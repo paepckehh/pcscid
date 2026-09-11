@@ -13,7 +13,6 @@ package pcscid
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -88,16 +87,30 @@ type Options struct {
 	ScanCommand string
 }
 
+// shortIDAlphabet is the full alphanumeric alphabet the short ID
+// encodes its digest in: digits, lower and upper case letters.
+const shortIDAlphabet = "0123456789" +
+	"abcdefghijklmnopqrstuvwxyz" +
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
 // ShortID derives the short unique identifier of a card from its type
 // and the unique tag of the individual card, its UID, or its ATR when
-// no UID is available. The ID is 16 hexadecimal characters, stable
-// across readers and re-presentations, and different for two cards
-// of the same type with different tags.
+// no UID is available. The ID is 11 alphanumeric characters in three
+// dash separated groups, xxxx-xxx-xxxx, stable across readers and
+// re-presentations, and different for two cards of the same type
+// with different tags.
 func ShortID(cardType string, tag []byte) string {
 	sum := sha256.Sum256(append(
 		append(append([]byte("pcscid/v1|"), cardType...), '|'),
 		tag...))
-	return hex.EncodeToString(sum[:8])
+	id := make([]byte, 0, 13)
+	for i, b := range sum[:11] {
+		if i == 4 || i == 7 {
+			id = append(id, '-')
+		}
+		id = append(id, shortIDAlphabet[int(b)%len(shortIDAlphabet)])
+	}
+	return string(id)
 }
 
 // Watch starts watching all readers of the local pcscd and reports

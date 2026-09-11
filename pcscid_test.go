@@ -72,8 +72,8 @@ func TestShortIDProperties(t *testing.T) {
 	if ShortID("type a", uidA) == ShortID("type b", uidA) {
 		t.Error("different types with the same uid must produce different ids")
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(ShortID("t", uidA)) {
-		t.Errorf("ShortID = %q, want 16 lowercase hex digits", ShortID("t", uidA))
+	if !regexp.MustCompile(`^[0-9A-Za-z]{4}-[0-9A-Za-z]{3}-[0-9A-Za-z]{4}$`).MatchString(ShortID("t", uidA)) {
+		t.Errorf("ShortID = %q, want xxxx-xxx-xxxx alphanumeric", ShortID("t", uidA))
 	}
 }
 

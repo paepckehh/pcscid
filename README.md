@@ -14,7 +14,7 @@ The same card always yields the same ID, on every reader, on every presentation.
 ## Highlights
 
 - **Pure Go, no cgo, Linux only** — speaks the `pcscd` daemon wire protocol directly over its Unix socket, no `libpcsclite` linked, the binary is a single static build. Speaks both protocol generations: 4.5 of pcsc-lite 2.x and 4.4 with down-negotiation for 1.8.x/1.9.x daemons.
-- **Per-card identity, not type detection** — reads the card's anti-collision UID through the PC/SC part 3 `GET DATA` APDU (`FF CA 00 00 00`) and folds it, together with the detected card type, into a 16-hex-digit ID.
+- **Per-card identity, not type detection** — reads the card's anti-collision UID through the PC/SC part 3 `GET DATA` APDU (`FF CA 00 00 00`) and folds it, together with the detected card type, into a short alphanumeric ID (`xxxx-xxx-xxxx`).
 - **Zero dependencies** — standard library only.
 - **Fails gracefully** — no `pcscd` socket reachable? Falls back to continuously parsing `pcsc_scan` output (type-level identity only, and it tells you so).
 - **Hardware-free tests** — an in-process fake `pcscd` daemon exercises the whole protocol stack; `make test` needs no reader and no card, fully parallel.
@@ -22,7 +22,7 @@ The same card always yields the same ID, on every reader, on every presentation.
 ## The ID
 
 ```text
-ID = hex( SHA-256("pcscid/v1|" + card-type + "|" + uid) [:8] )
+ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) [:11] )
 ```
 
 | Ingredient | Meaning |
@@ -30,14 +30,14 @@ ID = hex( SHA-256("pcscid/v1|" + card-type + "|" + uid) [:8] )
 | `card-type` | detected from the ATR: the PC/SC part 3 contactless table (`mifare classic 1k`, `mifare ultralight ev1`, `felica`, `picopass 16k`, ...), known full ATRs (`german eid/passport (npa)`, `yubikey 5 nfc`, `deutschlandticket (vdv-ka)`), or `unknown` |
 | `uid` | the card's own unique tag, normally 4/7/10 bytes. When neither card nor reader can provide one, the ATR is used instead and the ID degrades to type level — `Card.Source` (`uid`, `atr`, `scan`) tells you which |
 
-The ID is stable across readers, restarts and re-presentations, contains no date, timestamp or reader name, and is short enough to paste anywhere.
+The ID is stable across readers, restarts and re-presentations, contains no date, timestamp or reader name, and is short enough to paste anywhere. Its 11 characters come from the full alphanumeric alphabet — digits, lower and upper case — grouped into three dash separated segments `xxxx-xxx-xxxx`.
 
 ## Quick start
 
 ```console
 $ make build
 $ ./pcscid
-3f4e0a2cbf0d5b6e
+rnpe-ubP-qWBj
 ```
 
 Normal mode prints the bare ID plus a newline, nothing else — one line per card presentation. The sample app is the full API in ~70 lines.
@@ -49,9 +49,9 @@ $ DEBUG=1 ./pcscid
 time=... level=DEBUG msg="pcscid starting" version=v0.0.1
 time=... level=DEBUG msg="pcscd connected" socket=/run/pcscd/pcscd.comm version=4.4
 time=... level=DEBUG msg="card inserted" reader="ACS ACR122U 00 00" \
-    id=3f4e0a2cbf0d5b6e type="mifare classic 1k" source=uid uid="04 11 22 33" \
+    id=rnpe-ubP-qWBj type="mifare classic 1k" source=uid uid="04 11 22 33" \
     atr="3B 8F 80 01 80 4F 0C A0 00 00 03 06 03 00 01 00 00 00 00 6A" protocol=T=1
-3f4e0a2cbf0d5b6e
+rnpe-ubP-qWBj
 ```
 
 `./pcscid -version` prints the build-time semver, which the Makefile injects via `-ldflags` from the latest git tag.
@@ -79,7 +79,7 @@ for ev := range events {
 // Fine-grained pieces are exported too:
 pcscid.DetectType(atr)      // "mifare classic 1k"
 pcscid.ParseATR(atr)        // full ISO 7816-3 ATR breakdown
-pcscid.ShortID(type, uid)   // the 16-hex-digit identifier
+pcscid.ShortID(type, uid)   // the xxxx-xxx-xxxx identifier
 ```
 
 ## Card types recognized
