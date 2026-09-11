@@ -58,8 +58,8 @@ type Card struct {
 	// reports the same ID on every reader.
 	Reader string
 	// Source is what the ID was derived from: "uid" for a card
-	// unique tag, "atr" for a type level fallback, "scan" for the
-	// pcsc_scan text fallback which never sees a UID.
+	// unique tag, "atr" for a type level fallback when neither card nor
+	// reader provides a UID.
 	Source string
 }
 
@@ -82,9 +82,6 @@ type Options struct {
 	// SocketPath overrides the pcscd socket path. Empty selects the
 	// platform default, PCSCLITE_CSOCK_NAME overrides it on Unix.
 	SocketPath string
-	// ScanCommand overrides the pcsc_scan binary looked up for the
-	// text fallback, empty means "pcsc_scan" from the PATH.
-	ScanCommand string
 }
 
 // btagAlphabet is the alphabet the btag and reader tag encode their
@@ -131,47 +128,34 @@ func ReaderTag(reader string) string {
 // card insertions and removals on the returned channel. Cards that
 // are already present when Watch starts are reported as inserted.
 //
-// When the pcscd socket cannot be reached, it falls back to
-// continuously parsing the output of the pcsc_scan tool, when that is
-// installed. The fallback identifies cards on type level only, it
-// cannot distinguish two cards of the same type.
+// When the pcscd socket cannot be reached, Watch fails with that
+// error, the pcscd service is a hard requirement.
 //
 // The channel is closed once ctx is cancelled.
 func Watch(ctx context.Context, opts *Options) (<-chan Event, error) {
-	lg, socketPath, scanCmd := watchOptions(opts)
+	lg, socketPath := watchOptions(opts)
 	cl, err := pcsc.New(socketPath, lg)
 	if err != nil {
-		if path, lookErr := lookScan(scanCmd); lookErr == nil {
-			lg.Debug("pcscd unavailable, falling back to pcsc_scan",
-				"scan", path, "error", err)
-			ch := make(chan Event, 8)
-			go scanWatch(ctx, path, lg, ch)
-			return ch, nil
-		}
-		return nil, fmt.Errorf("pcscid: no pcscd and no %s available: %w", scanCmd, err)
+		return nil, fmt.Errorf("pcscid: pcscd unavailable: %w", err)
 	}
 	ch := make(chan Event, 8)
 	go watchLoop(ctx, cl, socketPath, lg, ch)
 	return ch, nil
 }
 
-func watchOptions(opts *Options) (lg *slog.Logger, socketPath, scanCmd string) {
+func watchOptions(opts *Options) (lg *slog.Logger, socketPath string) {
 	lg = slog.New(slog.DiscardHandler)
-	scanCmd = "pcsc_scan"
 	if opts != nil {
 		if opts.Logger != nil {
 			lg = opts.Logger
 		}
 		socketPath = opts.SocketPath
-		if opts.ScanCommand != "" {
-			scanCmd = opts.ScanCommand
-		}
 	}
-	return lg, socketPath, scanCmd
+	return lg, socketPath
 }
 
 // reconnectDelay is the pause between two pcscd reconnection
-// attempts, both in the watch loop and in the scan fallback.
+// attempts in the watch loop.
 const reconnectDelay = 500 * time.Millisecond
 
 // waitTick bounds one daemon side reader state wait. A change can slip

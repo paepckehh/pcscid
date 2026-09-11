@@ -16,7 +16,6 @@ The same card always yields the same btag, on every reader, on every presentatio
 - **Pure Go, no cgo, Linux only** — speaks the `pcscd` daemon wire protocol directly over its Unix socket, no `libpcsclite` linked, the binary is a single static build. Speaks both protocol generations: 4.5 of pcsc-lite 2.x and 4.4 with down-negotiation for 1.8.x/1.9.x daemons.
 - **Per-card identity, not type detection** — reads the card's anti-collision UID through the PC/SC part 3 `GET DATA` APDU (`FF CA 00 00 00`) and folds it, together with the detected card type, into a short lowercase alphanumeric btag (`xxx-xxx-xxxx`).
 - **Zero dependencies** — standard library only.
-- **Fails gracefully** — no `pcscd` socket reachable? Falls back to continuously parsing `pcsc_scan` output (type-level identity only, and it tells you so).
 - **Hardware-free tests** — an in-process fake `pcscd` daemon exercises the whole protocol stack; `make test` needs no reader and no card, fully parallel.
 
 ## The btag
@@ -28,7 +27,7 @@ ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) [:10] )   # xxx-xxx-xx
 | Ingredient | Meaning |
 | --- | --- |
 | `card-type` | detected from the ATR: the PC/SC part 3 contactless table (`mifare classic 1k`, `mifare ultralight ev1`, `felica`, `picopass 16k`, ...), known full ATRs (`german eid/passport (npa)`, `yubikey 5 nfc`, `deutschlandticket (vdv-ka)`), or `unknown` |
-| `uid` | the card's own unique tag, normally 4/7/10 bytes. When neither card nor reader can provide one, the ATR is used instead and the ID degrades to type level — `Card.Source` (`uid`, `atr`, `scan`) tells you which |
+| `uid` | the card's own unique tag, normally 4/7/10 bytes. When neither card nor reader can provide one, the ATR is used instead and the ID degrades to type level — `Card.Source` (`uid`, `atr`) tells you which |
 
 The btag is stable across readers, restarts and re-presentations, contains no date, timestamp or reader name, and is short enough to paste anywhere. Its 10 characters come from the digits and lower case letters only, grouped into three dash separated segments `xxx-xxx-xxxx`. The library exports the derivation as `Btag(cardType, tag)`, and every `Card.ID` carries the result.
 
@@ -103,11 +102,10 @@ cmd/pcscid ──▶ pcscid.Watch ──▶ pcsc.Client ──▶ /run/pcscd/pcs
 2. Card insertion events (presence bit plus event counter change) trigger identification: connect in shared mode, negotiate T=0/T=1, transmit the UID pseudo-APDU, disconnect.
 3. The ATR yields the card type; type plus UID (or ATR) yields the btag.
 4. Reader state waits are server-side with a bounded tick; on pcscd 2.x the wait answers with the fresh state array itself and timeouts are client-side, unblocking the daemon through the stop request. Context cancellation closes the socket to unblock instantly. When no reader is registered at all the daemon answers the wait immediately, so the loop polls gently instead of spinning.
-5. If the socket is unreachable at startup, `Watch` falls back to running `pcsc_scan` and parsing its ATR lines — carefully ignoring dates, event numbers and spinner noise. The `pcsc-scan-example-*.txt` files in this repo are real captures that the test suite runs through that parser.
 
 ## Requirements
 
-- Linux with `pcscd` (pcsc-lite 1.8.26 or newer) running, **or** `pcsc-tools` (`pcsc_scan`) as the text fallback
+- Linux with `pcscd` (pcsc-lite 1.8.26 or newer) running, a hard requirement
 - Go 1.25+ to build
 - Socket `/run/pcscd/pcscd.comm`, `PCSCLITE_CSOCK_NAME` overrides it
 
@@ -128,7 +126,6 @@ pcscid.go         Watch loop, event model, identification
 atr.go            ISO 7816-3 answer-to-reset parser
 cardtype.go       ATR to card type detection (PC/SC part 3 table, known ATRs)
 uid.go            UID pseudo-APDU probe
-scan.go           pcsc_scan output fallback parser
 version.go        semver via go linker -ldflags injection
 ```
 
@@ -138,7 +135,7 @@ version.go        semver via go linker -ldflags injection
 $ make test    # go test ./... — fully parallel, no hardware needed
 ```
 
-The fake daemon speaks the same wire protocol re-implemented a second time, so client and fake agreeing is itself part of the test, and it emulates both daemon generations. Fixture coverage includes every `pcsc-scan-example-*.txt` capture. The client was additionally verified live against a real pcscd 2.4.1.
+The fake daemon speaks the same wire protocol re-implemented a second time, so client and fake agreeing is itself part of the test, and it emulates both daemon generations. The client was additionally verified live against a real pcscd 2.4.1.
 
 ## License
 

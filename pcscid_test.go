@@ -3,8 +3,6 @@ package pcscid
 import (
 	"context"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"testing"
@@ -254,55 +252,14 @@ func TestWatchCancelClosesChannel(t *testing.T) {
 	}
 }
 
-func TestWatchScanFallback(t *testing.T) {
-	t.Parallel()
-	script := filepath.Join(t.TempDir(), "fake-pcsc_scan")
-	content := "#!/bin/sh\n" +
-		"printf ' Reader 0: ACS ACR122U 00 00\\n'\n" +
-		"printf '  Card state: Card inserted,\\n'\n" +
-		"printf '  ATR: 3B 84 80 01 80 82 90 00 97\\n'\n" +
-		"printf 'ATR: 3B 84 80 01 80 82 90 00 97\\n'\n" +
-		"sleep 30\n"
-	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	events, err := Watch(t.Context(), &Options{
-		SocketPath:  "/nonexistent-pcscd-socket",
-		ScanCommand: script,
-		Logger:      discardLogger(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ev := receiveEvent(t, events, 3*time.Second)
-	if ev.Kind != KindInsert {
-		t.Fatalf("kind = %v, want insert", ev.Kind)
-	}
-	atr := mustHex(t, "3B8480018082900097")
-	if ev.Card.Source != "scan" {
-		t.Errorf("source = %q, want scan", ev.Card.Source)
-	}
-	if ev.Card.Type != "german eid/passport (npa)" {
-		t.Errorf("type = %q", ev.Card.Type)
-	}
-	if ev.Card.ID != Btag("german eid/passport (npa)", atr) {
-		t.Errorf("id = %q", ev.Card.ID)
-	}
-	if !slices.Equal(ev.Card.ATR, atr) {
-		t.Errorf("atr = % X, want % X", ev.Card.ATR, atr)
-	}
-}
-
-func TestWatchUnavailableWithoutFallback(t *testing.T) {
+func TestWatchUnavailableWithoutPcscd(t *testing.T) {
 	t.Parallel()
 	_, err := Watch(t.Context(), &Options{
-		SocketPath:  "/nonexistent-pcscd-socket",
-		ScanCommand: "pcsc-scan-command-that-does-not-exist",
-		Logger:      discardLogger(),
+		SocketPath: "/nonexistent-pcscd-socket",
+		Logger:     discardLogger(),
 	})
 	if err == nil {
-		t.Fatal("Watch = nil error without pcscd and without pcsc_scan")
+		t.Fatal("Watch = nil error without pcscd")
 	}
 }
 

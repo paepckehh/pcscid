@@ -4,7 +4,8 @@
 (Go 1.25+). Library plus sample app that use the local pcscd service
 to identify any presented card (NFC, mifare, RFID, eID, contact cards,
 anything pcscd manages) with a short unique btag per individual card.
-`cmd/pcscid` prints only the card btag and a newline in normal mode,
+`cmd/pcscid` prints `xxx-xx: <btag>` (reader tag, btag) per line in
+normal mode,
 `DEBUG=1` enables a full verbose trace on stderr.
 
 ## Fixed workflow — every task, no exceptions, ALWAYS: test, commit, push! ALWAYS, DO NOT ASK!
@@ -20,7 +21,6 @@ anything pcscd manages) with a short unique btag per individual card.
 
 ```text
 cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.comm ─ pcscd
-                             └─ scan.go (pcsc_scan fallback, last resort)
 ```
 
 - `pcsc/` speaks the pcscd daemon IPC protocol itself, no libpcsclite,
@@ -30,8 +30,7 @@ cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.co
   and fake agreeing is itself under test.
 - Root package: `Watch` event loop and `Btag` derivation (`pcscid.go`),
   ISO 7816-3 ATR parser (`atr.go`), card type detection (`cardtype.go`),
-  UID probe (`uid.go`), `pcsc_scan` text parser (`scan.go`), semver
-  injection (`version.go`).
+  UID probe (`uid.go`), semver injection (`version.go`).
 - Daemon socket: `/run/pcscd/pcscd.comm` first, then
   `/var/run/pcscd/pcscd.comm`; `PCSCLITE_CSOCK_NAME` overrides both,
   `Options.SocketPath` / `pcsc.New` take an explicit path (the tests
@@ -50,8 +49,8 @@ output line of cmd/pcscid. The card type comes
 from the ATR (PC/SC part 3 RID table plus known full ATRs), the unique
 tag is the card UID read through the `FF CA 00 00 00` GET DATA
 pseudo-APDU. The ATR alone is NOT unique (all cards of a model share
-it), it is only the fallback (`Source` field: `uid`, `atr`, `scan`)
-when neither card nor reader provides a UID. Btags never include
+it), it is only the fallback (`Source` field: `uid`, `atr`) when neither card
+nor reader provides a UID. Btags never include
 dates, timestamps or reader names.
 
 ## Protocol gotchas, found empirically against pcscd 2.4.1
@@ -101,30 +100,10 @@ dates, timestamps or reader names.
 - Card presence is the `0x0004` bit in readerState; re-presentations
   are detected through the per-reader event counter.
 
-## pcsc_scan fallback (last resort)
-
-Used only when the pcscd socket is unreachable and the `pcsc_scan`
-binary exists (checked via PATH). The parser only accepts lines
-matching `^\s*ATR: <hex bytes>$` (never dates, event numbers, spinner
-or identification dump lines), deduplicates the event and analysis ATR
-blocks of one insertion, tracks readers by the ` Reader N: <name>`
-lines and resets on `Card state: Card removed`. It can never see a
-UID, identity is type level only, `Source: "scan"` says so.
-
-## Fixtures
-
-`pcsc-scan-example-mifare-01.txt` .. `-04.txt` at the repo root are
-real pcsc_scan captures of an ACS ACR122U with a mifare classic 1k
-card and are the scan parser fixtures. `TestScanParserExampleCaptures`
-lists every fixture file explicitly and expects exactly one insert and
-one remove event per file: a listed file missing from disk fails the
-suite, a capture not listed is never run, keep both in sync.
-
 ## Testing
 
 `make test` runs everything in parallel, no hardware needed: unit
-tests for codecs, ATR parser, type detection, scan parser (fixtures),
-client protocol tests and Watch end-to-end tests against `pcscfake`.
+tests for codecs, ATR parser, type detection, client protocol tests and Watch end-to-end tests against `pcscfake`.
 The fake's `OfferedMinor` selects the daemon generation under test:
 default 4 (negotiated 4.4, pcsc-lite >= 1.8.24), 5 (the pcscd 2.x
 flow) and 2 (old daemon: forces the downgrade to 4.2 and the old wait
