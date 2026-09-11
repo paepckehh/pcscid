@@ -1,0 +1,37 @@
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:05:18 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 8
+  Card state: Card removed,
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:05:20 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 9
+  Card state: Card inserted,
+  ATR: 3B 85 80 01 5A 43 56 44 56 59
+
+ATR: 3B 85 80 01 5A 43 56 44 56 59
++ TS = 3B --> Direct Convention
++ T0 = 85, Y(1): 1000, K: 5 (historical bytes)
+  TD(1) = 80 --> Y(i+1) = 1000, Protocol T = 0
+-----
+  TD(2) = 01 --> Y(i+1) = 0000, Protocol T = 1
+-----
++ Historical bytes: 5A 43 56 44 56
+  Category indicator byte: 5A (proprietary format)
++ TCK = 59 (correct checksum)
+
+Possibly identified card (using /nix/store/k0zh5qsa6kw8q1m1137gzwjbwsll9x92-pcsc-tools-1.7.5/share/pcsc/smartcard_list.txt):
+3B 85 80 01 5A 43 56 44 56 59
+        Electronic ticketing and electronic fare management in public transport smart card (VDV-KA core application interface)
+        https://www.eticket-deutschland.de/en/eticket/vdv-ka-and-eticore
+
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:05:21 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 10
+  Card state: Card removed,
+Insert or remove a card or a reader... |  (use Ctrl-C to exit)

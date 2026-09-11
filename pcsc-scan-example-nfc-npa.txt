@@ -1,0 +1,38 @@
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:03:02 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 4
+  Card state: Card removed,
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:04:06 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 5
+  Card state: Card inserted,
+  ATR: 3B 84 80 01 80 82 90 00 97
+
+ATR: 3B 84 80 01 80 82 90 00 97
++ TS = 3B --> Direct Convention
++ T0 = 84, Y(1): 1000, K: 4 (historical bytes)
+  TD(1) = 80 --> Y(i+1) = 1000, Protocol T = 0
+-----
+  TD(2) = 01 --> Y(i+1) = 0000, Protocol T = 1
+-----
++ Historical bytes: 80 82 90 00
+  Category indicator byte: 80 (compact TLV data object)
+    Tag: 8, len: 2 (status indicator)
+      SW: 9000
++ TCK = 97 (correct checksum)
+
+Possibly identified card (using /nix/store/k0zh5qsa6kw8q1m1137gzwjbwsll9x92-pcsc-tools-1.7.5/share/pcsc/smartcard_list.txt):
+3B 84 80 01 80 82 90 00 97
+        German passport (passport)
+
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:04:06 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 6
+  Card state: Card removed,
+Insert or remove a card or a reader... /  (use Ctrl-C to exit)

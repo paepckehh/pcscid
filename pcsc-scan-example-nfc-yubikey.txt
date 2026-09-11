@@ -1,0 +1,51 @@
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:01:21 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 2
+  Card state: Card removed,
+Insert or remove a card or a reader... /
+
+Fri Sep 11 08:03:02 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 3
+  Card state: Card inserted,
+  ATR: 3B 8D 80 01 80 73 C0 21 C0 57 59 75 62 69 4B 65 FF 7F
+
+ATR: 3B 8D 80 01 80 73 C0 21 C0 57 59 75 62 69 4B 65 FF 7F
++ TS = 3B --> Direct Convention
++ T0 = 8D, Y(1): 1000, K: 13 (historical bytes)
+  TD(1) = 80 --> Y(i+1) = 1000, Protocol T = 0
+-----
+  TD(2) = 01 --> Y(i+1) = 0000, Protocol T = 1
+-----
++ Historical bytes: 80 73 C0 21 C0 57 59 75 62 69 4B 65 FF
+  Category indicator byte: 80 (compact TLV data object)
+    Tag: 7, len: 3 (card capabilities)
+      Selection methods: C0
+        - DF selection by full DF name
+        - DF selection by partial DF name
+      Data coding byte: 21
+        - Behaviour of write functions: proprietary
+        - Value 'FF' for the first byte of BER-TLV tag fields: invalid
+        - Data unit in quartets: 2
+      Command chaining, length fields and logical channels: C0
+        - Command chaining
+        - Extended Lc and Le fields
+        - Logical channel number assignment: No logical channel
+        - Maximum number of logical channels: 1
+    Tag: 5, len: 7 (card issuer's data)
+      Card issuer data: 59 75 62 69 4B 65 FF
++ TCK = 7F (correct checksum)
+
+Possibly identified card (using /nix/store/k0zh5qsa6kw8q1m1137gzwjbwsll9x92-pcsc-tools-1.7.5/share/pcsc/smartcard_list.txt):
+3B 8D 80 01 80 73 C0 21 C0 57 59 75 62 69 4B 65 FF 7F
+        Yubikey 5 NFC via ACR122U (Other)
+
+Insert or remove a card or a reader..
+
+Fri Sep 11 08:03:02 2026
+ Reader 0: ACS ACR122U 00 00
+  Event number: 4
+  Card state: Card removed,
+Insert or remove a card or a reader... -  (use Ctrl-C to exit)
