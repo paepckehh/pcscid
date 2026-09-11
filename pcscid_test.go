@@ -201,6 +201,39 @@ func TestWatchFallsBackToATRWhenNoUID(t *testing.T) {
 	}
 }
 
+func TestWatchRandomUIDFallsBackToATR(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	// ISO/IEC 14443-3 random uid: first byte 0x08, a new value on
+	// every activation. It must not enter the identity, the btag
+	// falls back to the ATR and stays stable across touches.
+	fake.InsertCard("R", mifareATR, []byte{0x08, 0x11, 0x22, 0x33})
+	first := receiveEvent(t, events, 3*time.Second)
+	if first.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", first.Kind)
+	}
+	if first.Card.Source != "atr" {
+		t.Errorf("source = %q, want atr", first.Card.Source)
+	}
+	if len(first.Card.UID) != 0 {
+		t.Errorf("uid = % X, want empty for a random uid", first.Card.UID)
+	}
+	fake.RemoveCard("R")
+	if ev := receiveEvent(t, events, 3*time.Second); ev.Kind != KindRemove {
+		t.Fatalf("kind = %v, want remove", ev.Kind)
+	}
+	fake.InsertCard("R", mifareATR, []byte{0x08, 0xAA, 0xBB, 0xCC})
+	second := receiveEvent(t, events, 3*time.Second)
+	if second.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", second.Kind)
+	}
+	if second.Card.ID != first.Card.ID {
+		t.Errorf("id changed with the random uid: %q then %q", first.Card.ID, second.Card.ID)
+	}
+}
+
 func TestWatchNoRepeatWithoutChange(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)

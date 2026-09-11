@@ -13,6 +13,16 @@ import (
 // presented tag, which is the individual identifier of the card.
 var uidAPDU = []byte{0xFF, 0xCA, 0x00, 0x00, 0x00}
 
+// isRandomUID reports whether a UID is the ISO/IEC 14443-3 random
+// UID: privacy cards (for example phone NFC emulation, eID, newer
+// DESFire) answer the anti collision with a freshly generated 4 byte
+// UID whose first byte is 0x08 on every activation. Such a UID
+// changes on every touch and identifies nothing, the caller must
+// fall back to the ATR, type level identity.
+func isRandomUID(uid []byte) bool {
+	return len(uid) == 4 && uid[0] == 0x08
+}
+
 // probeUID connects to the card in reader and asks for its UID. It
 // returns nil when neither the card nor the reader can provide one,
 // the caller then falls back to ATR based, type level identification.
@@ -51,6 +61,11 @@ func probeUID(cl *pcsc.Client, lg *slog.Logger, reader string) (uid []byte, prot
 	uid = resp[:len(resp)-2]
 	if len(uid) == 0 {
 		lg.Debug("uid apdu returned no uid", "reader", reader)
+		return nil, card.Protocol()
+	}
+	if isRandomUID(uid) {
+		lg.Debug("uid is iso 14443-3 random uid, not a card identity, falling back to atr identity",
+			"reader", reader, "uid", fmt.Sprintf("% X", uid))
 		return nil, card.Protocol()
 	}
 	lg.Debug("uid read",

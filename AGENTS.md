@@ -51,7 +51,11 @@ tag is the card UID read through the `FF CA 00 00 00` GET DATA
 pseudo-APDU. The ATR alone is NOT unique (all cards of a model share
 it), it is only the fallback (`Source` field: `uid`, `atr`) when neither card
 nor reader provides a UID. Btags never include
-dates, timestamps or reader names.
+dates, timestamps or reader names. Privacy cards with an ISO/IEC
+14443-3 random UID (4 bytes starting `0x08`, a NEW value per
+activation, by design: phone NFC emulation, eID, newer DESFire) are
+detected in `uid.go` and fall back to the ATR, that UID identifies
+nothing.
 
 ## Protocol gotchas, found empirically against pcscd 2.4.1
 
