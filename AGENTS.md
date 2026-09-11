@@ -42,9 +42,11 @@ cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.co
 The per-card identifier is the btag, exported as `Btag(cardType, tag)`
 and carried in `Card.ID`:
 
-`ID = alnum(SHA-256("pcscid/v1|" + card-type + "|" + uid)[:11])`, 11
-chars of the full alphanumeric alphabet (digits, lower and upper case)
-in three dash separated groups `xxxx-xxx-xxxx`. The card type comes
+`ID = alnum(SHA-256("pcscid/v1|" + card-type + "|" + uid)[:10])`, 10
+chars of the digits and lower case letters only, in three dash
+separated groups `xxx-xxx-xxxx`. Readers get a stable short tag too,
+`ReaderTag(name)` -> `xxx-xx`, prefixed as `xxx-xx: <btag>` on every
+output line of cmd/pcscid. The card type comes
 from the ATR (PC/SC part 3 RID table plus known full ATRs), the unique
 tag is the card UID read through the `FF CA 00 00 00` GET DATA
 pseudo-APDU. The ATR alone is NOT unique (all cards of a model share

@@ -72,8 +72,23 @@ func TestBtagProperties(t *testing.T) {
 	if Btag("type a", uidA) == Btag("type b", uidA) {
 		t.Error("different types with the same uid must produce different ids")
 	}
-	if !regexp.MustCompile(`^[0-9A-Za-z]{4}-[0-9A-Za-z]{3}-[0-9A-Za-z]{4}$`).MatchString(Btag("t", uidA)) {
-		t.Errorf("Btag = %q, want xxxx-xxx-xxxx alphanumeric", Btag("t", uidA))
+	if !regexp.MustCompile(`^[0-9a-z]{3}-[0-9a-z]{3}-[0-9a-z]{4}$`).MatchString(Btag("t", uidA)) {
+		t.Errorf("Btag = %q, want xxx-xxx-xxxx lowercase alphanumeric", Btag("t", uidA))
+	}
+}
+
+func TestReaderTagProperties(t *testing.T) {
+	t.Parallel()
+	reader := "ACS ACR122U 00 00"
+	first := ReaderTag(reader)
+	if first != ReaderTag(reader) {
+		t.Error("ReaderTag is not deterministic")
+	}
+	if ReaderTag("reader a") == ReaderTag("reader b") {
+		t.Error("different readers must produce different tags")
+	}
+	if !regexp.MustCompile(`^[0-9a-z]{3}-[0-9a-z]{2}$`).MatchString(ReaderTag(reader)) {
+		t.Errorf("ReaderTag = %q, want xxx-xx lowercase alphanumeric", ReaderTag(reader))
 	}
 }
 

@@ -54,7 +54,7 @@ func run() error {
 	}
 	for ev := range events {
 		if ev.Kind == pcscid.KindInsert {
-			fmt.Println(ev.Card.ID)
+			fmt.Println(pcscid.ReaderTag(ev.Reader) + ": " + ev.Card.ID)
 		}
 	}
 	return nil

@@ -14,7 +14,7 @@ The same card always yields the same btag, on every reader, on every presentatio
 ## Highlights
 
 - **Pure Go, no cgo, Linux only** — speaks the `pcscd` daemon wire protocol directly over its Unix socket, no `libpcsclite` linked, the binary is a single static build. Speaks both protocol generations: 4.5 of pcsc-lite 2.x and 4.4 with down-negotiation for 1.8.x/1.9.x daemons.
-- **Per-card identity, not type detection** — reads the card's anti-collision UID through the PC/SC part 3 `GET DATA` APDU (`FF CA 00 00 00`) and folds it, together with the detected card type, into a short alphanumeric btag (`xxxx-xxx-xxxx`).
+- **Per-card identity, not type detection** — reads the card's anti-collision UID through the PC/SC part 3 `GET DATA` APDU (`FF CA 00 00 00`) and folds it, together with the detected card type, into a short lowercase alphanumeric btag (`xxx-xxx-xxxx`).
 - **Zero dependencies** — standard library only.
 - **Fails gracefully** — no `pcscd` socket reachable? Falls back to continuously parsing `pcsc_scan` output (type-level identity only, and it tells you so).
 - **Hardware-free tests** — an in-process fake `pcscd` daemon exercises the whole protocol stack; `make test` needs no reader and no card, fully parallel.
@@ -22,7 +22,7 @@ The same card always yields the same btag, on every reader, on every presentatio
 ## The btag
 
 ```text
-ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) [:11] )
+ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) [:10] )   # xxx-xxx-xxxx, digits and lower case
 ```
 
 | Ingredient | Meaning |
@@ -30,17 +30,17 @@ ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) [:11] )
 | `card-type` | detected from the ATR: the PC/SC part 3 contactless table (`mifare classic 1k`, `mifare ultralight ev1`, `felica`, `picopass 16k`, ...), known full ATRs (`german eid/passport (npa)`, `yubikey 5 nfc`, `deutschlandticket (vdv-ka)`), or `unknown` |
 | `uid` | the card's own unique tag, normally 4/7/10 bytes. When neither card nor reader can provide one, the ATR is used instead and the ID degrades to type level — `Card.Source` (`uid`, `atr`, `scan`) tells you which |
 
-The btag is stable across readers, restarts and re-presentations, contains no date, timestamp or reader name, and is short enough to paste anywhere. Its 11 characters come from the full alphanumeric alphabet — digits, lower and upper case — grouped into three dash separated segments `xxxx-xxx-xxxx`. The library exports the derivation as `Btag(cardType, tag)`, and every `Card.ID` carries the result.
+The btag is stable across readers, restarts and re-presentations, contains no date, timestamp or reader name, and is short enough to paste anywhere. Its 10 characters come from the digits and lower case letters only, grouped into three dash separated segments `xxx-xxx-xxxx`. The library exports the derivation as `Btag(cardType, tag)`, and every `Card.ID` carries the result.
 
 ## Quick start
 
 ```console
 $ make build
 $ ./pcscid
-rnpe-ubP-qWBj
+bbc-7t: r3v-401-5gmr
 ```
 
-Normal mode prints the bare btag plus a newline, nothing else — one line per card presentation. The sample app is the full API in ~70 lines.
+Normal mode prints one line per card presentation: the stable reader tag, a colon and the btag, nothing else. The sample app is the full API in ~70 lines.
 
 `DEBUG=1` turns on a complete verbose trace on stderr, while stdout stays machine-readable:
 
@@ -49,9 +49,9 @@ $ DEBUG=1 ./pcscid
 time=... level=DEBUG msg="pcscid starting" version=v0.0.1
 time=... level=DEBUG msg="pcscd connected" socket=/run/pcscd/pcscd.comm version=4.4
 time=... level=DEBUG msg="card inserted" reader="ACS ACR122U 00 00" \
-    id=rnpe-ubP-qWBj type="mifare classic 1k" source=uid uid="04 11 22 33" \
+    id=r3v-401-5gmr reader-tag=bbc-7t type="mifare classic 1k" source=uid uid="04 11 22 33" \
     atr="3B 8F 80 01 80 4F 0C A0 00 00 03 06 03 00 01 94 37 26 CB 24" protocol=T=1
-rnpe-ubP-qWBj
+bbc-7t: r3v-401-5gmr
 ```
 
 `./pcscid -version` prints the build-time semver, which the Makefile injects via `-ldflags` from the latest git tag.
@@ -79,7 +79,8 @@ for ev := range events {
 // Fine-grained pieces are exported too:
 pcscid.DetectType(atr)      // "mifare classic 1k"
 pcscid.ParseATR(atr)        // full ISO 7816-3 ATR breakdown
-pcscid.Btag(type, uid)       // the xxxx-xxx-xxxx btag
+pcscid.ReaderTag(reader)     // the xxx-xx reader tag
+pcscid.Btag(type, uid)        // the xxx-xxx-xxxx btag
 ```
 
 ## Card types recognized

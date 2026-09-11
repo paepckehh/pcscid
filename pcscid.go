@@ -87,30 +87,44 @@ type Options struct {
 	ScanCommand string
 }
 
-// btagAlphabet is the full alphanumeric alphabet the btag encodes
-// its digest in: digits, lower and upper case letters.
-const btagAlphabet = "0123456789" +
-	"abcdefghijklmnopqrstuvwxyz" +
-	"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+// btagAlphabet is the alphabet the btag and reader tag encode their
+// digests in: digits and lower case letters only.
+const btagAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 
-// Btag derives the btag, the short unique identifier of a card,
-// from its type and the unique tag of the individual card, its UID,
-// or its ATR when no UID is available. The btag is 11 alphanumeric
-// characters in three dash separated groups, xxxx-xxx-xxxx, stable
-// across readers and re-presentations, and different for two cards
-// of the same type with different tags.
-func Btag(cardType string, tag []byte) string {
-	sum := sha256.Sum256(append(
-		append(append([]byte("pcscid/v1|"), cardType...), '|'),
-		tag...))
-	id := make([]byte, 0, 13)
-	for i, b := range sum[:11] {
-		if i == 4 || i == 7 {
-			id = append(id, '-')
+// btagFormat groups n digest characters at the given dash positions.
+func btagFormat(sum []byte, n int, dashes ...int) string {
+	id := make([]byte, 0, n+len(dashes))
+	for i, b := range sum[:n] {
+		for _, d := range dashes {
+			if i == d {
+				id = append(id, '-')
+			}
 		}
 		id = append(id, btagAlphabet[int(b)%len(btagAlphabet)])
 	}
 	return string(id)
+}
+
+// Btag derives the btag, the short unique identifier of a card,
+// from its type and the unique tag of the individual card, its UID,
+// or its ATR when no UID is available. The btag is 10 characters from
+// the digits and lower case letters in three dash separated groups,
+// xxx-xxx-xxxx, stable across readers and re-presentations, and
+// different for two cards of the same type with different tags.
+func Btag(cardType string, tag []byte) string {
+	sum := sha256.Sum256(append(
+		append(append([]byte("pcscid/v1|"), cardType...), '|'),
+		tag...))
+	return btagFormat(sum[:], 10, 3, 6)
+}
+
+// ReaderTag derives the stable short unique identifier of a reader
+// from its pcscd reader name. The tag is 5 characters from the digits
+// and lower case letters in two dash separated groups, xxx-xx, the
+// same for the same reader across restarts.
+func ReaderTag(reader string) string {
+	sum := sha256.Sum256(append([]byte("pcscid/reader/v1|"), reader...))
+	return btagFormat(sum[:], 5, 3)
 }
 
 // Watch starts watching all readers of the local pcscd and reports
@@ -299,6 +313,7 @@ func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState) *Card {
 	lg.Debug("card inserted",
 		"reader", st.Reader,
 		"id", card.ID,
+		"reader-tag", ReaderTag(st.Reader),
 		"type", cardType,
 		"source", card.Source,
 		"uid", fmt.Sprintf("% X", uid),
