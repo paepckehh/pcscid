@@ -18,26 +18,25 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"time"
 )
 
 // Wire constants, mirroring pcsc-lite src/winscard_msg.h.
 const (
-	cmdEstablishContext      uint32 = 0x01
-	cmdReleaseContext        uint32 = 0x02
-	cmdConnect               uint32 = 0x04
-	cmdDisconnect            uint32 = 0x06
-	cmdTransmit              uint32 = 0x09
-	cmdVersion               uint32 = 0x11
-	cmdGetReadersState       uint32 = 0x12
-	cmdWaitReaderStateChange uint32 = 0x13
+	cmdEstablishContext             uint32 = 0x01
+	cmdReleaseContext               uint32 = 0x02
+	cmdConnect                      uint32 = 0x04
+	cmdDisconnect                   uint32 = 0x06
+	cmdTransmit                     uint32 = 0x09
+	cmdVersion                      uint32 = 0x11
+	cmdGetReadersState              uint32 = 0x12
+	cmdWaitReaderStateChange        uint32 = 0x13
+	cmdStopWaitingReaderStateChange uint32 = 0x14
 )
 
 // SCARD error codes and limits, mirroring pcsc-lite src/pcsclite.h.
 const (
 	errInvalidHandle  uint32 = 0x80100003
 	errUnknownReader  uint32 = 0x80100009
-	errTimeout        uint32 = 0x8010000A
 	errNoSmartcard    uint32 = 0x8010000C
 	errServiceStopped uint32 = 0x8010001E
 
@@ -56,6 +55,21 @@ const (
 
 const readerStateWireSz = 184
 
+// waitMsg mirrors struct wait_reader_state_change: 8 bytes, the
+// timeOut field is vestigial in every protocol version, only rv is
+// meaningful in the signal and the stop response.
+type waitMsg struct {
+	timeoutMS uint32
+	rv        uint32
+}
+
+func encodeWait(w waitMsg) []byte {
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint32(buf[0:], w.timeoutMS)
+	binary.LittleEndian.PutUint32(buf[4:], w.rv)
+	return buf
+}
+
 // Server is a fake pcscd listening on a Unix stream socket in a
 // temporary directory. It serves reader states, card connections and
 // APDU exchanges for the UID pseudo-APDU FF CA 00 00 00.
@@ -73,7 +87,9 @@ type Server struct {
 
 	mu      sync.Mutex
 	readers map[string]*Reader
-	waiters map[chan struct{}]struct{}
+	// waiters holds the connections registered for reader state
+	// change signals, mirroring the daemon client list.
+	waiters map[net.Conn]struct{}
 	conns   map[net.Conn]struct{}
 	cards   map[uint32]*card
 	handles uint32
@@ -111,7 +127,7 @@ func New() (*Server, error) {
 		ctx:          ctx,
 		cancel:       cancel,
 		readers:      make(map[string]*Reader),
-		waiters:      make(map[chan struct{}]struct{}),
+		waiters:      make(map[net.Conn]struct{}),
 		conns:        make(map[net.Conn]struct{}),
 		cards:        make(map[uint32]*card),
 	}
@@ -154,10 +170,14 @@ func (s *Server) RemoveCard(reader string) {
 }
 
 func (s *Server) wakeWaiters() {
+	// The daemon writes one 8 byte wait_reader_state_change struct
+	// to every registered connection and drops it from the list, the
+	// registration does not survive a signal.
+	signal := encodeWait(waitMsg{})
 	s.mu.Lock()
-	for ch := range s.waiters {
-		close(ch)
-		delete(s.waiters, ch)
+	for conn := range s.waiters {
+		delete(s.waiters, conn)
+		_, _ = conn.Write(signal)
 	}
 	s.mu.Unlock()
 }
@@ -203,6 +223,11 @@ func (s *Server) acceptLoop() {
 }
 
 func (s *Server) serve(conn net.Conn) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.waiters, conn)
+		s.mu.Unlock()
+	}()
 	if !s.negotiate(conn) {
 		return
 	}
@@ -265,19 +290,33 @@ func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool
 		return false, s.writeStates(conn)
 
 	case cmdWaitReaderStateChange:
-		if s.OfferedMinor >= 5 {
-			return false, s.waitNew(conn)
+		if s.OfferedMinor < 4 {
+			// Protocol 4.3 and older: the request carries the 8 byte
+			// wait struct, the daemon stays silent until a change.
+			if len(body) != 8 {
+				return true, fmt.Errorf("pcscfake: wait body %d bytes, want 8", len(body))
+			}
+			s.register(conn)
+			return false, nil
 		}
-		timeoutMS := binary.LittleEndian.Uint32(body[0:4])
-		rv, err := s.waitForChange(timeoutMS)
-		if err != nil {
+		// Protocol 4.4+: no request body, the daemon registers the
+		// connection and immediately dumps the reader state array.
+		if err := s.registerAndDump(conn); err != nil {
 			return true, err
 		}
-		resp := make([]byte, 8)
-		binary.LittleEndian.PutUint32(resp[0:], timeoutMS)
-		binary.LittleEndian.PutUint32(resp[4:], rv)
-		_, err = conn.Write(resp)
-		return false, err
+		return false, nil
+
+	case cmdStopWaitingReaderStateChange:
+		if s.OfferedMinor < 4 && len(body) != 8 {
+			return true, fmt.Errorf("pcscfake: stop body %d bytes, want 8", len(body))
+		}
+		// The response is sent only when the connection was still
+		// registered, as in the daemon.
+		if s.unregister(conn) {
+			_, err := conn.Write(encodeWait(waitMsg{}))
+			return false, err
+		}
+		return false, nil
 
 	case cmdConnect:
 		return false, s.connect(conn, body)
@@ -295,64 +334,41 @@ func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool
 	return true, fmt.Errorf("pcscfake: unknown command 0x%02X", command)
 }
 
-// waitForChange blocks until a state change, the timeout or shutdown.
-// It implements the protocol 4.4 wait with the server side timeout.
-func (s *Server) waitForChange(timeoutMS uint32) (uint32, error) {
-	ch := s.registerWaiter()
-	defer s.unregisterWaiter(ch)
-	timer := time.NewTimer(time.Duration(timeoutMS) * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-ch:
-		return 0, nil
-	case <-timer.C:
-		return errTimeout, nil
-	case <-s.ctx.Done():
-		return 0, s.ctx.Err()
-	}
+// register adds conn to the reader state change waiter list.
+func (s *Server) register(conn net.Conn) {
+	s.mu.Lock()
+	s.waiters[conn] = struct{}{}
+	s.mu.Unlock()
 }
 
-// waitNew implements the protocol 4.5+ reader state wait: the request
-// carries no body, the answer is the full reader state array as soon
-// as a change happens or the client sends anything, a stop request
-// additionally gets its own 8 byte answer, mirroring pcscd 2.x.
-func (s *Server) waitNew(conn net.Conn) error {
-	stopped := make(chan struct{}, 1)
-	go func() {
-		// Any client data unblocks the wait, as in the daemon. A stop
-		// request is exactly its 8 byte header, so consuming it here
-		// keeps the dispatch loop in sync.
-		head := make([]byte, 8)
-		if _, err := io.ReadFull(conn, head); err == nil {
-			stopped <- struct{}{}
+// registerAndDump adds conn to the waiter list and answers with the
+// full reader state array, both under the server lock: a change in
+// between would signal before the dump and desync the client stream,
+// the daemon serializes both through its client list lock the same
+// way.
+func (s *Server) registerAndDump(conn net.Conn) error {
+	buf := make([]byte, maxReaders*readerStateWireSz)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.waiters[conn] = struct{}{}
+	for i, name := range slices.Sorted(maps.Keys(s.readers)) {
+		if i >= maxReaders {
+			break
 		}
-	}()
-	change := s.registerWaiter()
-	defer s.unregisterWaiter(change)
-
-	var writeErr error
-	select {
-	case <-change:
-		// Cancel the stop watcher and restore the socket for the next
-		// dispatch read.
-		_ = conn.SetReadDeadline(time.Now())
-		_ = conn.SetReadDeadline(time.Time{})
-		writeErr = s.writeStates(conn)
-		select {
-		case <-stopped:
-			// A stop raced the change, answer it too to stay in sync.
-			_, writeErr = conn.Write(make([]byte, 8))
-		default:
-		}
-	case <-stopped:
-		writeErr = s.writeStates(conn)
-		if writeErr == nil {
-			_, writeErr = conn.Write(make([]byte, 8))
-		}
-	case <-s.ctx.Done():
-		return s.ctx.Err()
+		encodeReaderStateInto(buf[i*readerStateWireSz:], name, s.readers[name])
 	}
-	return writeErr
+	_, err := conn.Write(buf)
+	return err
+}
+
+// unregister removes conn from the waiter list and reports whether
+// it was registered.
+func (s *Server) unregister(conn net.Conn) bool {
+	s.mu.Lock()
+	_, ok := s.waiters[conn]
+	delete(s.waiters, conn)
+	s.mu.Unlock()
+	return ok
 }
 
 // writeStates answers with the raw 16 entry reader state array.
@@ -368,20 +384,6 @@ func (s *Server) writeStates(conn net.Conn) error {
 	s.mu.Unlock()
 	_, err := conn.Write(buf)
 	return err
-}
-
-func (s *Server) registerWaiter() chan struct{} {
-	ch := make(chan struct{})
-	s.mu.Lock()
-	s.waiters[ch] = struct{}{}
-	s.mu.Unlock()
-	return ch
-}
-
-func (s *Server) unregisterWaiter(ch chan struct{}) {
-	s.mu.Lock()
-	delete(s.waiters, ch)
-	s.mu.Unlock()
 }
 
 func (s *Server) connect(conn net.Conn, body []byte) error {

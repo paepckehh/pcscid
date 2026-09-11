@@ -192,68 +192,111 @@ func (c *ipcClient) states() ([]ReaderState, error) {
 }
 
 // waitChange blocks until any reader state change occurs on the
-// daemon. The wire format changed with protocol 4.5: pcsc-lite 2.x
-// daemons take no request body and answer the wait with the complete
-// reader state array, timeouts are client side, implemented through
-// cmdStopWaitingReaderStateChange. Older daemons take a timeout in
-// the request and answer with a small struct.
+// daemon. The wire format changed with protocol 4.4: pcsc-lite 1.8.24
+// and 2.x daemons take no request body, answer the wait registration
+// immediately with the complete reader state array and deliver a later
+// change as a separate 8 byte struct, the timeout is client side,
+// implemented through cmdStopWaitingReaderStateChange. Daemons of
+// protocol 4.3 and older take an 8 byte timeout struct in the request
+// and stay silent until a change happens or the client gives up.
 func (c *ipcClient) waitChange(timeout time.Duration) error {
-	if c.minor >= 5 {
+	if c.minor >= 4 {
 		return c.waitChangeNew(timeout)
 	}
 	return c.waitChangeOld(timeout)
 }
 
+// waitChangeNew implements the protocol 4.4+ reader state wait. The
+// daemon answers the registration itself with the full reader state
+// array: that dump only confirms the registration, it is not the
+// change signal. The signal is a separate 8 byte struct, delivered
+// once a change actually happens. A client side timeout withdraws
+// the registration with a stop request; exactly one 8 byte answer
+// follows, either the stop response or a signal that raced it, so
+// the stream stays in sync either way.
 func (c *ipcClient) waitChangeNew(timeout time.Duration) error {
-	// The read deadline is the timeout itself: the daemon has no
-	// server side timeout in this protocol, it blocks until a change
-	// or until the client sends the stop request.
-	if err := c.setDeadline(timeout + waitMargin); err != nil {
+	if err := c.setDeadline(commandTimeout); err != nil {
 		return err
 	}
 	// The request carries no body, the timeout is client side.
 	if err := writeMessage(c.conn, cmdWaitReaderStateChange, nil); err != nil {
 		return fmt.Errorf("pcsc: send wait: %w", err)
 	}
+	// Consume the registration dump, the states are fetched again
+	// once a change is signaled.
 	if _, err := readRaw(c.conn, maxReaders*readerStateWireSz); err != nil {
-		if !isNetTimeout(err) {
-			return fmt.Errorf("pcsc: receive wait: %w", err)
-		}
-		// The deadline fired: unblock the daemon side wait and drain
-		// both answers, the wait response with the reader state array
-		// first and the stop response second, to stay in sync.
-		if err := c.setDeadline(waitSlack); err != nil {
-			return err
-		}
-		_ = writeMessage(c.conn, cmdStopWaitingReaderStateChange, nil)
-		_, _ = readRaw(c.conn, maxReaders*readerStateWireSz)
-		_, _ = readRaw(c.conn, 8)
-		return ErrTimeout
+		return fmt.Errorf("pcsc: receive wait registration: %w", err)
 	}
-	return nil
+	if err := c.setDeadline(timeout + waitMargin); err != nil {
+		return err
+	}
+	signal, err := readRaw(c.conn, 8)
+	if err == nil {
+		if rv := decodeWait(signal).rv; rv != 0 {
+			return Error(rv)
+		}
+		return nil
+	}
+	if !isNetTimeout(err) {
+		return fmt.Errorf("pcsc: receive wait signal: %w", err)
+	}
+	// The deadline fired: withdraw the registration. The one 8 byte
+	// answer is the stop response or a racing signal; a swallowed
+	// race is picked up by the states fetch of the next loop turn.
+	if err := c.setDeadline(waitSlack); err != nil {
+		return err
+	}
+	if err := writeMessage(c.conn, cmdStopWaitingReaderStateChange, nil); err != nil {
+		return fmt.Errorf("pcsc: send stop wait: %w", err)
+	}
+	if signal, err := readRaw(c.conn, 8); err == nil {
+		if rv := decodeWait(signal).rv; rv != 0 {
+			return Error(rv)
+		}
+	}
+	return ErrTimeout
 }
 
+// waitChangeOld implements the reader state wait of protocol 4.3 and
+// older daemons: the request carries the 8 byte wait struct, the
+// daemon stays silent until a change occurs and the timeout is
+// enforced client side. A timed out registration is withdrawn with a
+// stop request carrying the same struct, a leftover registration
+// would duplicate the signal of the next one.
 func (c *ipcClient) waitChangeOld(timeout time.Duration) error {
 	ms := uint32(timeout.Milliseconds())
 	if ms == 0 {
 		ms = 1
 	}
-	// The daemon blocks for up to timeoutMS, allow slack on top.
-	if err := c.setDeadline(timeout + waitSlack); err != nil {
+	req := encodeWait(waitMsg{timeoutMS: ms})
+	if err := c.setDeadline(timeout + waitMargin); err != nil {
 		return err
 	}
-	if err := writeMessage(c.conn, cmdWaitReaderStateChange, encodeWait(waitMsg{timeoutMS: ms})); err != nil {
+	if err := writeMessage(c.conn, cmdWaitReaderStateChange, req); err != nil {
 		return fmt.Errorf("pcsc: send wait: %w", err)
 	}
-	// Responses carry no message header.
-	rspBody, err := readRaw(c.conn, 8)
-	if err != nil {
+	signal, err := readRaw(c.conn, 8)
+	if err == nil {
+		if rv := decodeWait(signal).rv; rv != 0 {
+			return Error(rv)
+		}
+		return nil
+	}
+	if !isNetTimeout(err) {
 		return fmt.Errorf("pcsc: receive wait: %w", err)
 	}
-	if resp := decodeWait(rspBody); resp.rv != 0 {
-		return Error(resp.rv)
+	if err := c.setDeadline(waitSlack); err != nil {
+		return err
 	}
-	return nil
+	if err := writeMessage(c.conn, cmdStopWaitingReaderStateChange, req); err != nil {
+		return fmt.Errorf("pcsc: send stop wait: %w", err)
+	}
+	if signal, err := readRaw(c.conn, 8); err == nil {
+		if rv := decodeWait(signal).rv; rv != 0 {
+			return Error(rv)
+		}
+	}
+	return ErrTimeout
 }
 
 func isNetTimeout(err error) bool {
@@ -287,11 +330,12 @@ func (c *ipcClient) connect(reader string, preferred uint32) (*Card, error) {
 func (c *ipcClient) close() error {
 	// Send the context release best effort: a daemon blocked in a
 	// reader state wait for this connection will not read it until
-	// the wait ends, so never wait for a response. For protocol 4.5+
-	// a pending wait is unblocked first, the daemon only serves the
-	// next request once its wait returned. Closing the socket is the
-	// real teardown and the cancellation path of a blocked WaitChange.
-	if c.minor >= 5 {
+	// the wait ends, so never wait for a response. For protocol 4.4+
+	// a pending wait registration is withdrawn first, the daemon
+	// only serves the next request once its wait returned. Closing
+	// the socket is the real teardown and the cancellation path of a
+	// blocked WaitChange.
+	if c.minor >= 4 {
 		_ = c.setDeadline(2 * time.Second)
 		_ = writeMessage(c.conn, cmdStopWaitingReaderStateChange, nil)
 	}

@@ -127,6 +127,63 @@ func TestClientWaitChangeTimeout(t *testing.T) {
 	}
 }
 
+// The protocol 4.3 and older wait carries an 8 byte request struct
+// and stays silent until a change, mirroring pcsc-lite 1.8.20.
+func newTestClientOldProtocol(t *testing.T) (*Client, *pcscfake.Server) {
+	t.Helper()
+	fake, err := pcscfake.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fake.Close() })
+	fake.OfferedMinor = 2 // negotiated downgrade, old wait protocol
+	cl, err := New(fake.Addr(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cl.Close() })
+	return cl, fake
+}
+
+func TestClientWaitChangeWakesOnInsertOldProtocol(t *testing.T) {
+	t.Parallel()
+	cl, fake := newTestClientOldProtocol(t)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var waitErr error
+	go func() {
+		defer wg.Done()
+		waitErr = cl.WaitChange(5 * time.Second)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	fake.InsertCard("Reader 0", []byte{0x3B, 0x00}, []byte{0x04})
+	wg.Wait()
+	if waitErr != nil {
+		t.Errorf("WaitChange = %v, want nil on state change", waitErr)
+	}
+}
+
+func TestClientWaitChangeTimeoutStaysInSyncOldProtocol(t *testing.T) {
+	t.Parallel()
+	cl, fake := newTestClientOldProtocol(t)
+	fake.InsertCard("R", []byte{0x3B, 0x00}, []byte{0x04})
+	if _, err := cl.States(); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if err := cl.WaitChange(50 * time.Millisecond); !errors.Is(err, ErrTimeout) {
+			t.Fatalf("wait %d = %v, want ErrTimeout", i, err)
+		}
+		states, err := cl.States()
+		if err != nil {
+			t.Fatalf("states after wait timeout %d: %v", i, err)
+		}
+		if len(states) != 1 {
+			t.Fatalf("states after wait timeout %d = %d readers, want 1", i, len(states))
+		}
+	}
+}
+
 func TestClientConnectAndTransmitUID(t *testing.T) {
 	t.Parallel()
 	cl, fake := newTestClient(t)

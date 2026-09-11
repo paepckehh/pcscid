@@ -12,10 +12,11 @@ import (
 	"paepcke.de/pcscid/internal/pcscfake"
 )
 
-// The protocol 4.5+ wait differs from 4.4: no request body, the
-// answer is the reader state array and timeouts are client side.
-// These tests drive it against a fake pcscd 2.x daemon, the live
-// behaviour was confirmed against a real pcscd 2.4.1.
+// The protocol 4.4+ wait carries no request body, the daemon answers
+// the registration itself with the reader state array and signals a
+// later change as a separate 8 byte struct, timeouts are client
+// side. These tests drive it against a fake pcscd 2.x daemon, the
+// wire behaviour mirrors pcsc-lite 1.8.24 through 2.4.1.
 
 func newTestClientNewProtocol(t *testing.T) (*Client, *pcscfake.Server) {
 	t.Helper()
@@ -70,6 +71,22 @@ func TestClientWaitChangeNewProtocolWakesOnInsert(t *testing.T) {
 	wg.Wait()
 	if waitErr != nil {
 		t.Errorf("WaitChange = %v, want nil on state change", waitErr)
+	}
+}
+
+// The daemon answers the wait registration immediately with the
+// reader state array. WaitChange must still block for the timeout
+// instead of mistaking that dump for a change: that bug returned
+// instantly and spun the watch loop at full speed.
+func TestClientWaitChangeNewProtocolBlocksForTimeout(t *testing.T) {
+	t.Parallel()
+	cl, _ := newTestClientNewProtocol(t)
+	start := time.Now()
+	if err := cl.WaitChange(150 * time.Millisecond); !errors.Is(err, ErrTimeout) {
+		t.Errorf("WaitChange = %v, want ErrTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Errorf("WaitChange returned after %v, want it to block", elapsed)
 	}
 }
 
