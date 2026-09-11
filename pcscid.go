@@ -253,6 +253,11 @@ func newTracking() *readerTracking {
 // pollLoop processes reader state changes until the transport breaks
 // or ctx is cancelled.
 func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, lg *slog.Logger, ch chan<- Event) error {
+	// The event counters of a fresh connection mean nothing yet: a
+	// restarted daemon counts from zero again, so a still present
+	// card must not be re-reported just because its counter moved.
+	// Presence alone decides until the counters are known again.
+	tracking.counters = make(map[string]uint32)
 	for {
 		states, err := cl.States()
 		if err != nil {
@@ -268,7 +273,8 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, lg
 			present := st.State&pcsc.ReaderPresent != 0
 			wasPresent := tracking.present[st.Reader]
 			if present {
-				if !wasPresent || tracking.counters[st.Reader] != st.EventCounter {
+				prev, known := tracking.counters[st.Reader]
+				if !wasPresent || (known && prev != st.EventCounter) {
 					card := identify(cl, lg, st)
 					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader}) {
 						return nil

@@ -39,7 +39,7 @@ $ ./pcscid
 bbc-7t: r3v-401-5gmr
 ```
 
-Normal mode prints one line per card presentation: the stable reader tag, a colon and the btag, nothing else. The sample app is the full API in ~70 lines.
+Normal mode prints one line per card presentation: the stable reader tag, a colon and the btag, nothing else.
 
 `DEBUG=1` turns on a complete verbose trace on stderr, while stdout stays machine-readable:
 
@@ -105,7 +105,7 @@ cmd/pcscid ──▶ pcscid.Watch ──▶ pcsc.Client ──▶ /run/pcscd/pcs
 
 ## Requirements
 
-- Linux with `pcscd` (pcsc-lite 1.8.26 or newer) running, a hard requirement
+- Linux with `pcscd` running, a hard requirement — pcsc-lite 1.8.24+ speaks protocol 4.4/4.5 natively, older daemons are handled through protocol down-negotiation
 - Go 1.25+ to build
 - Socket `/run/pcscd/pcscd.comm`, `PCSCLITE_CSOCK_NAME` overrides it
 

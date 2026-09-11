@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"paepcke.de/pcscid/internal/pcscfake"
+	"paepcke.de/pcscid/pcsc"
 )
 
 var mifareATR = []byte{
@@ -333,6 +334,60 @@ func TestWatchUnavailableWithoutPcscd(t *testing.T) {
 	if err == nil {
 		t.Fatal("Watch = nil error without pcscd")
 	}
+}
+
+func TestWatchDaemonRestartDoesNotReReport(t *testing.T) {
+	t.Parallel()
+	first := newFake(t)
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	first.InsertCard("R", mifareATR, uid)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	tracking := newTracking()
+	ch := make(chan Event, 8)
+	lg := discardLogger()
+
+	clA, err := pcsc.New(first.Addr(), lg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clA.Close() })
+	done := make(chan error, 1)
+	go func() {
+		done <- pollLoop(ctx, clA, tracking, lg, ch)
+	}()
+	ev := receiveEvent(t, ch, 3*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	cancel()
+	clA.Close() // unblocks the WaitChange inside pollLoop
+	<-done
+
+	// pcscd restarts: a fresh daemon counts events from zero again,
+	// the card never moved and must not be reported a second time.
+	second := newFake(t)
+	second.InsertCard("R", mifareATR, uid)
+	ctx2, cancel2 := context.WithCancel(t.Context())
+	t.Cleanup(cancel2)
+	clB, err := pcsc.New(second.Addr(), lg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { clB.Close() })
+	ch2 := make(chan Event, 8)
+	done2 := make(chan error, 1)
+	go func() {
+		done2 <- pollLoop(ctx2, clB, tracking, lg, ch2)
+	}()
+	select {
+	case ev := <-ch2:
+		t.Fatalf("unexpected event %+v after daemon restart", ev)
+	case <-time.After(750 * time.Millisecond):
+	}
+	cancel2()
+	clB.Close() // unblocks the WaitChange inside pollLoop
+	<-done2
 }
 
 func TestKindString(t *testing.T) {

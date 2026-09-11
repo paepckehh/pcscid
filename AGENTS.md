@@ -4,9 +4,8 @@
 (Go 1.25+). Library plus sample app that use the local pcscd service
 to identify any presented card (NFC, mifare, RFID, eID, contact cards,
 anything pcscd manages) with a short unique btag per individual card.
-`cmd/pcscid` prints `xxx-xx: <btag>` (reader tag, btag) per line in
-normal mode,
-`DEBUG=1` enables a full verbose trace on stderr.
+`cmd/pcscid` prints `xxx-xx: <btag>` (reader tag, btag) per line
+in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
 
 ## Fixed workflow — every task, no exceptions, ALWAYS: test, commit, push! ALWAYS, DO NOT ASK!
 
@@ -43,27 +42,24 @@ and carried in `Card.ID`:
 
 `ID = alnum(SHA-256("pcscid/v1|" + card-type + "|" + uid)[:10])`, 10
 chars of the digits and lower case letters only, in three dash
-separated groups `xxx-xxx-xxxx`. Readers get a stable short tag too,
-`ReaderTag(name)` -> `xxx-xx`, prefixed as `xxx-xx: <btag>` on every
-output line of cmd/pcscid. The card type comes
-from the ATR (PC/SC part 3 RID table plus known full ATRs), the unique
-tag is the card UID read through the `FF CA 00 00 00` GET DATA
-pseudo-APDU. The ATR alone is NOT unique (all cards of a model share
-it), it is only the fallback (`Source` field: `uid`, `atr`) when neither card
-nor reader provides a UID. Btags never include
-dates, timestamps or reader names. Privacy cards with an ISO/IEC
-14443-3 random UID (4 bytes starting `0x08`, a NEW value per
-activation, by design: phone NFC emulation, eID, newer DESFire) are
-detected in `uid.go` and fall back to the ATR, that UID identifies
-nothing. The btag is a pure function of card type + UID: the same
-card produces the same btag on every machine, every pcscd socket and
-every reader, nothing host, reader or time derived enters the hash.
-The reader tag `ReaderTag(name)` hashes the pcscd reader name with
-its volatile trailing hotplug index groups stripped
-(`normalizeReaderName`), so the same physical reader keeps its tag
-across machines, USB ports and daemon restarts; the daemon protocol
-carries no hardware serial, so two units of the same model share one
-tag.
+separated groups `xxx-xxx-xxxx`. The card type comes from the ATR
+(PC/SC part 3 RID table plus known full ATRs), the unique tag is the
+card UID read through the `FF CA 00 00 00` GET DATA pseudo-APDU. The
+ATR alone is NOT unique (all cards of a model share it), it is only
+the fallback (`Source` field: `uid`, `atr`) when neither card nor
+reader provides a UID. Privacy cards with an ISO/IEC 14443-3 random
+UID (4 bytes starting `0x08`, a NEW value per activation, by
+design: phone NFC emulation, eID, newer DESFire) are detected in
+`uid.go` and fall back to the ATR, that UID identifies nothing.
+Btags never include dates, timestamps or reader names, the btag is
+a pure function of card type + tag: the same card produces the same
+btag on every machine, every pcscd socket and every reader.
+`ReaderTag(name)` derives the reader tag `xxx-xx` the same way, it
+hashes the pcscd reader name with its volatile trailing hotplug
+index groups stripped (`normalizeReaderName`), so the same physical
+reader keeps its tag across machines, USB ports and daemon
+restarts; the daemon protocol carries no hardware serial, so two
+units of the same model share one tag.
 
 ## Protocol gotchas, found empirically against pcscd 2.4.1
 
@@ -101,6 +97,10 @@ tag.
   change can slip between the states fetch and the wait registration;
   a timed out wait is benign, the loop refetches the states and
   continues.
+- Event counters are only comparable within one daemon session: a
+  restarted daemon counts from zero again, so `pollLoop` drops the
+  remembered counters on every (re)connection and a card that never
+  moved is not re-reported.
 - `Close` never waits for responses: it writes release best effort
   (plus the stop request first on protocol 4.4+) and closes the socket,
   which is also the cancellation path of a blocked wait. A `Client` is
