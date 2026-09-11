@@ -42,6 +42,7 @@ func run() error {
 	} else {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	fmt.Fprintln(os.Stderr, "pcscid", pcscid.Version())
 	logger.Debug("pcscid starting", "version", pcscid.Version())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
