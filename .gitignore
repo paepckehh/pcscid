@@ -1,0 +1,4 @@
+/pcscid
+*.out
+*.test
+coverage.*
