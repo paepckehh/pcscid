@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"paepcke.de/pcscid/pcsc"
@@ -118,10 +119,49 @@ func Btag(cardType string, tag []byte) string {
 // ReaderTag derives the stable short unique identifier of a reader
 // from its pcscd reader name. The tag is 5 characters from the digits
 // and lower case letters in two dash separated groups, xxx-xx, the
-// same for the same reader across restarts.
+// same for the same reader across restarts, sockets, machines and
+// USB ports.
+//
+// pcscd reader names end in volatile hotplug indices, for example
+// "ACS ACR122U 01 00 00", where the trailing number groups change
+// with the USB port, the boot order and the machine. Those groups are
+// stripped before hashing, so the tag follows the reader hardware,
+// not its point of attachment. Two identical reader models share one
+// tag, there is no serial number in the daemon protocol.
 func ReaderTag(reader string) string {
-	sum := sha256.Sum256(append([]byte("pcscid/reader/v1|"), reader...))
+	sum := sha256.Sum256(append([]byte("pcscid/reader/v1|"), normalizeReaderName(reader)...))
 	return btagFormat(sum[:], 5, 3)
+}
+
+// normalizeReaderName strips the trailing pcscd hotplug index groups
+// (space separated one or two digit decimal numbers) from a reader name,
+// keeping the stable product part.
+func normalizeReaderName(reader string) string {
+	for {
+		last := strings.LastIndexByte(reader, ' ')
+		if last < 0 || last == len(reader)-1 {
+			return reader
+		}
+		tail := reader[last+1:]
+		if !isHotplugIndex(tail) {
+			return reader
+		}
+		reader = reader[:last]
+	}
+}
+
+// isHotplugIndex reports whether s is one pcscd hotplug index group:
+// one or two decimal digits (pcscd formats them %02d).
+func isHotplugIndex(s string) bool {
+	if len(s) == 0 || len(s) > 2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Watch starts watching all readers of the local pcscd and reports

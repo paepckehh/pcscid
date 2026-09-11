@@ -55,7 +55,15 @@ dates, timestamps or reader names. Privacy cards with an ISO/IEC
 14443-3 random UID (4 bytes starting `0x08`, a NEW value per
 activation, by design: phone NFC emulation, eID, newer DESFire) are
 detected in `uid.go` and fall back to the ATR, that UID identifies
-nothing.
+nothing. The btag is a pure function of card type + UID: the same
+card produces the same btag on every machine, every pcscd socket and
+every reader, nothing host, reader or time derived enters the hash.
+The reader tag `ReaderTag(name)` hashes the pcscd reader name with
+its volatile trailing hotplug index groups stripped
+(`normalizeReaderName`), so the same physical reader keeps its tag
+across machines, USB ports and daemon restarts; the daemon protocol
+carries no hardware serial, so two units of the same model share one
+tag.
 
 ## Protocol gotchas, found empirically against pcscd 2.4.1
 

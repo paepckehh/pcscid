@@ -90,6 +90,45 @@ func TestReaderTagProperties(t *testing.T) {
 	}
 }
 
+func TestReaderTagStableAcrossHostsAndPorts(t *testing.T) {
+	t.Parallel()
+	same := []string{
+		"ACS ACR122U 01 00 00",
+		"ACS ACR122U 02 00 00",
+		"ACS ACR122U 01 01 00",
+		"ACS ACR122U",
+	}
+	want := ReaderTag(same[0])
+	for _, name := range same[1:] {
+		if got := ReaderTag(name); got != want {
+			t.Errorf("ReaderTag(%q) = %s, want %s: hotplug suffix must not change the tag", name, got, want)
+		}
+	}
+	if ReaderTag("ACS ACR122U") == ReaderTag("SCM Microsystems Inc. SCL011") {
+		t.Error("different reader models must produce different tags")
+	}
+	if ReaderTag("") == "" {
+		t.Error("empty reader name must still produce a tag")
+	}
+}
+
+func TestBtagStableUnderAllConditions(t *testing.T) {
+	t.Parallel()
+	uid := []byte{0x04, 0xA1, 0xB2, 0xC3}
+	// The same card on any reader, machine or daemon speaks the same
+	// type (from the reader independent ATR) and the same UID: the btag
+	// must be a pure function of those bytes and nothing else.
+	if Btag("mifare classic 1k", uid) != Btag("mifare classic 1k", slices.Clone(uid)) {
+		t.Error("Btag must not depend on the underlying uid slice")
+	}
+	if Btag("mifare classic 1k", uid) == Btag("mifare classic 4k", uid) {
+		t.Error("card type must take part in the btag")
+	}
+	if Btag("mifare classic 1k", uid) == Btag("mifare classic 1k", []byte{0x04, 0xA1, 0xB2, 0xC4}) {
+		t.Error("uid must take part in the btag")
+	}
+}
+
 func TestWatchReportsPresentCardAtStart(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
