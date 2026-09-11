@@ -93,7 +93,7 @@ func TestScanParserExampleCaptures(t *testing.T) {
 			want := []Event{
 				{
 					Kind:   KindInsert,
-					Card:   &Card{ID: ShortID(tt.cardType, atr), Type: tt.cardType, ATR: atr, Reader: "ACS ACR122U 00 00", Source: "scan"},
+					Card:   &Card{ID: Btag(tt.cardType, atr), Type: tt.cardType, ATR: atr, Reader: "ACS ACR122U 00 00", Source: "scan"},
 					Reader: "ACS ACR122U 00 00",
 				},
 				{Kind: KindRemove, Reader: "ACS ACR122U 00 00"},
@@ -149,7 +149,7 @@ func TestScanParserIgnoresNoise(t *testing.T) {
 	if !slices.Equal(ev.Card.ATR, atr) {
 		t.Errorf("atr = % X, want % X", ev.Card.ATR, atr)
 	}
-	if ev.Card.ID != ShortID("german eid/passport (npa)", atr) {
+	if ev.Card.ID != Btag("german eid/passport (npa)", atr) {
 		t.Errorf("id = %q", ev.Card.ID)
 	}
 }

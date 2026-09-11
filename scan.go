@@ -71,7 +71,7 @@ func (p *scanParser) line(text string) *Event {
 	return &Event{
 		Kind: KindInsert,
 		Card: &Card{
-			ID:     ShortID(cardType, atr),
+			ID:     Btag(cardType, atr),
 			Type:   cardType,
 			ATR:    atr,
 			Reader: p.reader,

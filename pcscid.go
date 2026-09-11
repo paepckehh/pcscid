@@ -3,11 +3,11 @@
 // cards and everything else the daemon manages.
 //
 // It is pure Go without cgo, on Unix it speaks the pcscd daemon wire
-// protocol directly. The identifier of a card is a short hash over
-// the card type and the unique tag of the individual card, normally
-// its UID read through the PC/SC part 3 GET DATA APDU. When no UID
-// can be read the ATR is used, which identifies the card on type
-// level only.
+// protocol directly. The identifier of a card, its btag, is a short
+// hash over the card type and the unique tag of the individual card,
+// normally its UID read through the PC/SC part 3 GET DATA APDU. When
+// no UID can be read the ATR is used, which identifies the card on
+// type level only.
 package pcscid
 
 import (
@@ -45,7 +45,7 @@ func (k Kind) String() string {
 
 // Card is the identification of one presented smart card.
 type Card struct {
-	// ID is the short unique identifier, the output of ShortID.
+	// ID is the btag, the short unique identifier, the output of Btag.
 	ID string
 	// Type is the detected card type name, see DetectType.
 	Type string
@@ -87,19 +87,19 @@ type Options struct {
 	ScanCommand string
 }
 
-// shortIDAlphabet is the full alphanumeric alphabet the short ID
-// encodes its digest in: digits, lower and upper case letters.
-const shortIDAlphabet = "0123456789" +
+// btagAlphabet is the full alphanumeric alphabet the btag encodes
+// its digest in: digits, lower and upper case letters.
+const btagAlphabet = "0123456789" +
 	"abcdefghijklmnopqrstuvwxyz" +
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-// ShortID derives the short unique identifier of a card from its type
-// and the unique tag of the individual card, its UID, or its ATR when
-// no UID is available. The ID is 11 alphanumeric characters in three
-// dash separated groups, xxxx-xxx-xxxx, stable across readers and
-// re-presentations, and different for two cards of the same type
-// with different tags.
-func ShortID(cardType string, tag []byte) string {
+// Btag derives the btag, the short unique identifier of a card,
+// from its type and the unique tag of the individual card, its UID,
+// or its ATR when no UID is available. The btag is 11 alphanumeric
+// characters in three dash separated groups, xxxx-xxx-xxxx, stable
+// across readers and re-presentations, and different for two cards
+// of the same type with different tags.
+func Btag(cardType string, tag []byte) string {
 	sum := sha256.Sum256(append(
 		append(append([]byte("pcscid/v1|"), cardType...), '|'),
 		tag...))
@@ -108,7 +108,7 @@ func ShortID(cardType string, tag []byte) string {
 		if i == 4 || i == 7 {
 			id = append(id, '-')
 		}
-		id = append(id, shortIDAlphabet[int(b)%len(shortIDAlphabet)])
+		id = append(id, btagAlphabet[int(b)%len(btagAlphabet)])
 	}
 	return string(id)
 }
@@ -290,10 +290,10 @@ func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState) *Card {
 	uid, protocol := probeUID(cl, lg, st.Reader)
 	card.UID = uid
 	if len(uid) > 0 {
-		card.ID = ShortID(cardType, uid)
+		card.ID = Btag(cardType, uid)
 		card.Source = "uid"
 	} else {
-		card.ID = ShortID(cardType, st.ATR)
+		card.ID = Btag(cardType, st.ATR)
 		card.Source = "atr"
 	}
 	lg.Debug("card inserted",

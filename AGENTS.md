@@ -3,8 +3,8 @@
 `paepcke.de/pcscid` — pure Go, no cgo, Linux only. Library plus sample
 app that use the local pcscd service to identify any presented card
 (NFC, mifare, RFID, eID, contact cards, anything pcscd manages) with a
-short unique ID per individual card. `cmd/pcscid` prints only the
-card ID and a newline in normal mode, `DEBUG=1` enables a full verbose
+short unique btag per individual card. `cmd/pcscid` prints only the
+card btag and a newline in normal mode, `DEBUG=1` enables a full verbose
 trace on stderr.
 
 ## Fixed workflow — every task, no exceptions, ALWAYS: test, commit, push! ALWAYS, DO NOT ASK!
@@ -28,21 +28,25 @@ cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.co
 - `internal/pcscfake` is a second, independent implementation of the
   same wire protocol used as an in-process daemon for tests: client
   and fake agreeing is itself under test.
-- Root package: `Watch` event loop (`pcscid.go`), ISO 7816-3 ATR
-  parser (`atr.go`), card type detection (`cardtype.go`), UID probe
-  (`uid.go`), `pcsc_scan` text parser (`scan.go`), semver injection
-  (`version.go`).
+- Root package: `Watch` event loop and `Btag` derivation (`pcscid.go`),
+  ISO 7816-3 ATR parser (`atr.go`), card type detection (`cardtype.go`),
+  UID probe (`uid.go`), `pcsc_scan` text parser (`scan.go`), semver
+  injection (`version.go`).
 
 ## Card identity
 
+The per-card identifier is the btag, exported as `Btag(cardType, tag)`
+and carried in `Card.ID`:
+
 `ID = alnum(SHA-256("pcscid/v1|" + card-type + "|" + uid)[:11])`, 11
 chars of the full alphanumeric alphabet (digits, lower and upper case)
-in three dash separated groups `xxxx-xxx-xxxx`. The card type comes from the ATR (PC/SC part 3 RID table plus
-known full ATRs), the unique tag is the card UID read through the
-`FF CA 00 00 00` GET DATA pseudo-APDU. The ATR alone is NOT unique
-(all cards of a model share it), it is only the fallback (`Source`
-field: `uid`, `atr`, `scan`) when neither card nor reader provides a
-UID. IDs never include dates, timestamps or reader names.
+in three dash separated groups `xxxx-xxx-xxxx`. The card type comes
+from the ATR (PC/SC part 3 RID table plus known full ATRs), the unique
+tag is the card UID read through the `FF CA 00 00 00` GET DATA
+pseudo-APDU. The ATR alone is NOT unique (all cards of a model share
+it), it is only the fallback (`Source` field: `uid`, `atr`, `scan`)
+when neither card nor reader provides a UID. Btags never include
+dates, timestamps or reader names.
 
 ## Protocol gotchas, found empirically against pcscd 2.4.1
 

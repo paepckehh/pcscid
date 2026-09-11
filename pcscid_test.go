@@ -58,22 +58,22 @@ func watchFake(t *testing.T, fake *pcscfake.Server) (<-chan Event, context.Cance
 	return events, cancel
 }
 
-func TestShortIDProperties(t *testing.T) {
+func TestBtagProperties(t *testing.T) {
 	t.Parallel()
 	uidA := []byte{0x04, 0x11, 0x22, 0x33}
 	uidB := []byte{0x04, 0x44, 0x55, 0x66}
-	first := ShortID("mifare classic 1k", uidA)
-	if first != ShortID("mifare classic 1k", uidA) {
-		t.Error("ShortID is not deterministic")
+	first := Btag("mifare classic 1k", uidA)
+	if first != Btag("mifare classic 1k", uidA) {
+		t.Error("Btag is not deterministic")
 	}
-	if ShortID("mifare classic 1k", uidA) == ShortID("mifare classic 1k", uidB) {
+	if Btag("mifare classic 1k", uidA) == Btag("mifare classic 1k", uidB) {
 		t.Error("same type with different uids must produce different ids")
 	}
-	if ShortID("type a", uidA) == ShortID("type b", uidA) {
+	if Btag("type a", uidA) == Btag("type b", uidA) {
 		t.Error("different types with the same uid must produce different ids")
 	}
-	if !regexp.MustCompile(`^[0-9A-Za-z]{4}-[0-9A-Za-z]{3}-[0-9A-Za-z]{4}$`).MatchString(ShortID("t", uidA)) {
-		t.Errorf("ShortID = %q, want xxxx-xxx-xxxx alphanumeric", ShortID("t", uidA))
+	if !regexp.MustCompile(`^[0-9A-Za-z]{4}-[0-9A-Za-z]{3}-[0-9A-Za-z]{4}$`).MatchString(Btag("t", uidA)) {
+		t.Errorf("Btag = %q, want xxxx-xxx-xxxx alphanumeric", Btag("t", uidA))
 	}
 }
 
@@ -89,8 +89,8 @@ func TestWatchReportsPresentCardAtStart(t *testing.T) {
 		t.Fatalf("kind = %v, want insert", ev.Kind)
 	}
 	card := ev.Card
-	if card.ID != ShortID("mifare classic 1k", uid) {
-		t.Errorf("id = %q, want %q", card.ID, ShortID("mifare classic 1k", uid))
+	if card.ID != Btag("mifare classic 1k", uid) {
+		t.Errorf("id = %q, want %q", card.ID, Btag("mifare classic 1k", uid))
 	}
 	if card.Type != "mifare classic 1k" {
 		t.Errorf("type = %q", card.Type)
@@ -183,7 +183,7 @@ func TestWatchFallsBackToATRWhenNoUID(t *testing.T) {
 	if len(ev.Card.UID) != 0 {
 		t.Errorf("uid = % X, want empty", ev.Card.UID)
 	}
-	if ev.Card.ID != ShortID("mifare classic 1k", mifareATR) {
+	if ev.Card.ID != Btag("mifare classic 1k", mifareATR) {
 		t.Errorf("id = %q, want atr derived id", ev.Card.ID)
 	}
 }
@@ -271,7 +271,7 @@ func TestWatchScanFallback(t *testing.T) {
 	if ev.Card.Type != "german eid/passport (npa)" {
 		t.Errorf("type = %q", ev.Card.Type)
 	}
-	if ev.Card.ID != ShortID("german eid/passport (npa)", atr) {
+	if ev.Card.ID != Btag("german eid/passport (npa)", atr) {
 		t.Errorf("id = %q", ev.Card.ID)
 	}
 	if !slices.Equal(ev.Card.ATR, atr) {
