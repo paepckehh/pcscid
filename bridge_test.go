@@ -89,8 +89,8 @@ func TestBridgeFeedDerivesTags(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("exactly one card event expected, got %+v", got)
 	}
-	if len(got[0].Reader) != 6 || !strings.Contains(got[0].Reader, "-") {
-		t.Fatalf("reader must be a canonical xxx-xx tag, got %q", got[0].Reader)
+	if len(got[0].Reader) != 10 || !strings.Contains(got[0].Reader, "-") {
+		t.Fatalf("reader must be a canonical xx-xxxx-xx tag, got %q", got[0].Reader)
 	}
 	if got[0].Card != "r3v-401-5gmr" {
 		t.Fatalf("card btag must be forwarded unchanged, got %q", got[0].Card)

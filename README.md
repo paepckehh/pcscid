@@ -22,7 +22,7 @@ No cgo. No `libpcsclite`. No dependencies. One static binary that talks the `pcs
 
 ```console
 $ ./pcscid
-#qrx-lr:r3v-401-5gmr        # reader tag, btag; # marks a btag line
+#qr-xlrk-i5:r3v-401-5gmr        # reader tag, btag; # marks a btag line
 ```
 
 ## Why pcscid
@@ -45,14 +45,14 @@ ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) )[:10]    # → xxx-xx
 | `card-type` | detected from the ATR: PC/SC part 3 contactless table (`mifare classic 1k`, `mifare ultralight ev1`, `felica`, `picopass 16k`, …), known full ATRs (`german eid/passport (npa)`, `yubikey 5 nfc`, `deutschlandticket (vdv-ka)`), or `unknown` |
 | `uid` | the card's own unique tag (4/7/10 bytes). When neither card nor reader provides one, the ATR is used and the ID degrades to type level — `Card.Source` says which |
 
-The derivation is a pure function of card type + tag: no timestamps, no reader names, no machine state. The same card produces the same btag everywhere, forever — the digest is pinned by golden tests, so it can never change silently on you. Readers get the same treatment: `ReaderTag` hashes the normalized pcscd reader name (volatile hotplug indices stripped) into a stable `xxx-xx` tag that follows the hardware across machines and USB ports.
+The derivation is a pure function of card type + tag: no timestamps, no reader names, no machine state. The same card produces the same btag everywhere, forever — the digest is pinned by golden tests, so it can never change silently on you. Readers get the same treatment: `ReaderTag` hashes the normalized pcscd reader name (volatile hotplug indices stripped) into a stable `xx-xxxx-xx` tag that follows the hardware across machines and USB ports.
 
 ## Quick start
 
 ```console
 $ make build
 $ ./pcscid
-#qrx-lr:r3v-401-5gmr
+#qr-xlrk-i5:r3v-401-5gmr
 ```
 
 One line per presentation: `#`, the reader tag, a colon, the btag. Nothing else — stdout is machine readable by design; the leading `#` marks a btag line.
@@ -63,9 +63,9 @@ One line per presentation: `#`, the reader tag, a colon, the btag. Nothing else 
 $ DEBUG=1 ./pcscid
 time=... level=DEBUG msg="pcscd connected" socket=/run/pcscd/pcscd.comm version=4.5
 time=... level=DEBUG msg="card inserted" reader="ACS ACR122U 00 00" \
-    id=r3v-401-5gmr reader-tag=qrx-lr type="mifare classic 1k" source=uid \
+    id=r3v-401-5gmr reader-tag=qr-xlrk-i5 type="mifare classic 1k" source=uid \
     uid="04 11 22 33" protocol=T=1
-#qrx-lr:r3v-401-5gmr
+#qr-xlrk-i5:r3v-401-5gmr
 ```
 
 `./pcscid -version` prints the build-time semver (injected from the latest git tag by `make build`).
@@ -89,7 +89,7 @@ A 2 s startup grace swallows Watch's initial "cards already present" report (a c
 
 ```console
 $ PCSCID_HTTP_ADDR=127.0.0.1:8976 ./pcscid
-#qrx-lr:r3v-401-5gmr
+#qr-xlrk-i5:r3v-401-5gmr
 ```
 
 ## Use the library
@@ -116,7 +116,7 @@ The fine-grained pieces are exported too:
 ```go
 pcscid.DetectType(atr)     // "mifare classic 1k"
 pcscid.ParseATR(atr)       // full ISO 7816-3 breakdown, with TCK check
-pcscid.ReaderTag(reader)    // the xxx-xx reader tag
+pcscid.ReaderTag(reader)    // the xx-xxxx-xx reader tag
 pcscid.Btag(type, uid)     // the xxx-xxx-xxxx btag
 ```
 

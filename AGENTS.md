@@ -4,7 +4,7 @@
 (Go 1.25+). Library plus sample app that use the local pcscd service
 to identify any presented card (NFC, mifare, RFID, eID, contact cards,
 anything pcscd manages) with a short unique btag per individual card.
-`cmd/pcscid` prints `#xxx-xx:xxx-xxx-xxxx` (`#` prefixes the
+`cmd/pcscid` prints `#xx-xxxx-xx:xxx-xxx-xxxx` (`#` prefixes the
 whole line, then reader tag, btag) per line
 in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
 `PCSCID_HTTP_ADDR` (env var config) turns on the loopback HTTP
@@ -59,7 +59,7 @@ design: phone NFC emulation, eID, newer DESFire) are detected in
 Btags never include dates, timestamps or reader names, the btag is
 a pure function of card type + tag: the same card produces the same
 btag on every machine, every pcscd socket and every reader.
-`ReaderTag(name)` derives the reader tag `xxx-xx` the same way, it
+`ReaderTag(name)` derives the reader tag `xx-xxxx-xx` the same way, it
 hashes the pcscd reader name with its volatile trailing hotplug
 index groups stripped (`normalizeReaderName`), so the same physical
 reader keeps its tag across machines, USB ports and daemon

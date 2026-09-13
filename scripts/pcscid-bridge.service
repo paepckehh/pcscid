@@ -1,6 +1,6 @@
 # pcscid bridge mode — loopback HTTP bridge from pcscd to a kiosk browser
 # page. Runs the same pcscid binary with PCSCID_HTTP_ADDR set, so every
-# card presentation's reader tag (xxx-xx) and card btag (xxx-xxx-xxxx) are
+# card presentation's reader tag (xx-xxxx-xx) and card btag (xxx-xxx-xxxx) are
 # served on http://127.0.0.1:8976 (loopback only). Install next to the
 # kiosk browser on the terminal:
 #

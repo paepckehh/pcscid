@@ -105,8 +105,8 @@ func TestReaderTagGolden(t *testing.T) {
 		reader string
 		want   string
 	}{
-		{"ACS ACR122U 01 00 00", "qrx-lr"},
-		{"SCM Microsystems Inc. SCL011", "nt1-ox"},
+		{"ACS ACR122U 01 00 00", "qr-xlrk-i5"},
+		{"SCM Microsystems Inc. SCL011", "nt-1oxi-df"},
 	}
 	for _, g := range golden {
 		if got := ReaderTag(g.reader); got != g.want {
@@ -125,8 +125,8 @@ func TestReaderTagProperties(t *testing.T) {
 	if ReaderTag("reader a") == ReaderTag("reader b") {
 		t.Error("different readers must produce different tags")
 	}
-	if !regexp.MustCompile(`^[0-9a-z]{3}-[0-9a-z]{2}$`).MatchString(ReaderTag(reader)) {
-		t.Errorf("ReaderTag = %q, want xxx-xx lowercase alphanumeric", ReaderTag(reader))
+	if !regexp.MustCompile(`^[0-9a-z]{2}-[0-9a-z]{4}-[0-9a-z]{2}$`).MatchString(ReaderTag(reader)) {
+		t.Errorf("ReaderTag = %q, want xx-xxxx-xx lowercase alphanumeric", ReaderTag(reader))
 	}
 }
 

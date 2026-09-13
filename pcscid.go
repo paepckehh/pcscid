@@ -127,9 +127,9 @@ func Btag(cardType string, tag []byte) string {
 }
 
 // ReaderTag derives the stable short unique identifier of a reader
-// from its pcscd reader name. The tag is 5 characters from the digits
-// and lower case letters in two dash separated groups, xxx-xx, the
-// same for the same reader across restarts, sockets, machines and
+// from its pcscd reader name. The tag is 8 characters from the digits
+// and lower case letters in three dash separated groups, xx-xxxx-xx,
+// the same for the same reader across restarts, sockets, machines and
 // USB ports.
 //
 // pcscd reader names end in volatile hotplug indices, for example
@@ -140,7 +140,7 @@ func Btag(cardType string, tag []byte) string {
 // tag, there is no serial number in the daemon protocol.
 func ReaderTag(reader string) string {
 	sum := digestID([]byte("pcscid/reader/v1|"), []byte(normalizeReaderName(reader)))
-	return btagFormat(sum[:], 5, 3)
+	return btagFormat(sum[:], 8, 2, 6)
 }
 
 // normalizeReaderName strips the trailing pcscd hotplug index groups

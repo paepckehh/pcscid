@@ -4,7 +4,7 @@
 // nor page JavaScript may open one, and Firefox implements neither WebUSB
 // nor WebHID. A Bridge fans the pcscid watch events out to such pages: it
 // serves every card presentation's stable hardware identities — the reader
-// tag (ReaderTag, "xxx-xx") and the card btag (Btag, "xxx-xxx-xxxx") — on
+// tag (ReaderTag, "xx-xxxx-xx") and the card btag (Btag, "xxx-xxx-xxxx") — on
 // a small CORS-permissive HTTP surface made for a loopback listener:
 //
 //	GET /health           → {"ok":true,"version":...} liveness probe
@@ -70,7 +70,7 @@ type BridgeOptions struct {
 }
 
 // BridgeEvent is one card presentation served over the bridge HTTP
-// surface. Reader is the reader tag (xxx-xx), Card the card btag
+// surface. Reader is the reader tag (xx-xxxx-xx), Card the card btag
 // (xxx-xxx-xxxx). ID is the monotonic cursor the /pending polling
 // fallback replays with (after=last seen ID).
 type BridgeEvent struct {
