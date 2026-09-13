@@ -1,7 +1,7 @@
 # AGENTS.md
 
 `paepcke.de/pcscid` — pure Go, no cgo, Linux only, zero dependencies
-(Go 1.25+). Library plus sample app that use the local pcscd service
+(Go 1.26+). Library plus sample app that use the local pcscd service
 to identify any presented card (NFC, mifare, RFID, eID, contact cards,
 anything pcscd manages) with a short unique btag per individual card.
 `cmd/pcscid` prints `#xx-xxxx-xx:xxx-xxx-xxxx` (`#` prefixes the

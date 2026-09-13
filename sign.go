@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -193,18 +194,15 @@ func parseOpenSSHEd25519(data []byte) (ed25519.PrivateKey, error) {
 // armor lines.
 func decodeOpenSSHArmor(data []byte) ([]byte, error) {
 	lines := strings.Split(string(data), "\n")
-	i := 0
-	for ; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == openSSHArmorBegin {
-			break
-		}
-	}
-	if i == len(lines) {
+	begin := slices.IndexFunc(lines, func(line string) bool {
+		return strings.TrimSpace(line) == openSSHArmorBegin
+	})
+	if begin < 0 {
 		return nil, errors.New("missing OPENSSH PRIVATE KEY armor")
 	}
 	var b64 strings.Builder
-	for i++; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
+	for _, line := range lines[begin+1:] {
+		line = strings.TrimSpace(line)
 		if line == openSSHArmorEnd {
 			blob, err := base64.StdEncoding.DecodeString(b64.String())
 			if err != nil {

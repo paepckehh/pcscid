@@ -4,7 +4,7 @@
 
 **One short, stable ID for every smart card you tap. Any card, any reader, pure Go.**
 
-[![go version](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go)](#)
+[![go version](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go)](#)
 [![cgo](https://img.shields.io/badge/cgo-none-success)](#)
 [![dependencies](https://img.shields.io/badge/dependencies-0-informational)](#)
 [![platform](https://img.shields.io/badge/platform-linux-1793d1?logo=linux)](#)
@@ -186,7 +186,7 @@ The empirical protocol gotchas (header-less responses, the unframed APDU bytes o
 ## Requirements & install
 
 - Linux with `pcscd` running (pcsc-lite 1.8.24+ speaks protocol 4.4/4.5 natively; older daemons are handled through down-negotiation)
-- Go 1.25+ to build
+- Go 1.26+ to build (any Go 1.25+ toolchain auto-downloads the pinned version from `go.mod`)
 - Socket `/run/pcscd/pcscd.comm` (`PCSCLITE_CSOCK_NAME` overrides)
 
 ```console
@@ -205,9 +205,23 @@ bridge.go          loopback HTTP bridge: SSE + polling of reader tags and btags
 atr.go             ISO 7816-3 answer-to-reset parser
 cardtype.go        ATR to card type detection (PC/SC part 3 table, known ATRs)
 uid.go             UID pseudo-APDU probe, random UID detection
+sign.go            SSHSIG line signatures (pure stdlib ssh-ed25519)
 version.go         semver via go linker -ldflags injection
 scripts/           hardened systemd unit for bridge mode on a kiosk
 ```
+
+## Development
+
+```console
+$ make build   # binary with the latest git tag baked in as the semver
+$ make check   # gofmt, go vet, go mod tidy
+$ make test    # full suite, fully parallel, no hardware needed
+$ make push    # pull, then push commits and tags
+```
+
+The semver of `./pcscid -version` comes from `git describe --tags --abbrev=0` through
+`-ldflags "-X paepcke.de/pcscid.version=<tag>"`; without injection the binary falls back
+to the VCS revision recorded in the Go build info, and finally to `dev`.
 
 ## Testing
 

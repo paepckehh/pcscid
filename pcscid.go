@@ -166,7 +166,7 @@ func isHotplugIndex(s string) bool {
 	if len(s) == 0 || len(s) > 2 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] < '0' || s[i] > '9' {
 			return false
 		}

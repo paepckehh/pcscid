@@ -112,6 +112,9 @@ func (c *ipcClient) handshake() error {
 		}
 		resp := decodeVersion(body)
 		if resp.rv == 0 {
+			if resp.major != protocolVersionMajor {
+				return fmt.Errorf("pcsc: daemon speaks protocol %d.%d, only 4.x is supported", resp.major, resp.minor)
+			}
 			c.major, c.minor = resp.major, resp.minor
 			return nil
 		}

@@ -5,6 +5,7 @@
 package pcsc
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 )
@@ -271,10 +272,8 @@ func decodeReaderState(buf []byte) ReaderState {
 }
 
 func cString(b []byte) string {
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
-		}
+	if before, _, ok := bytes.Cut(b, []byte{0}); ok {
+		return string(before)
 	}
 	return string(b)
 }

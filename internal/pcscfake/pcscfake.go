@@ -7,6 +7,7 @@
 package pcscfake
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -547,10 +548,8 @@ func readMessage(r io.Reader) (command uint32, body []byte, err error) {
 }
 
 func cString(b []byte) string {
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
-		}
+	if before, _, ok := bytes.Cut(b, []byte{0}); ok {
+		return string(before)
 	}
 	return string(b)
 }

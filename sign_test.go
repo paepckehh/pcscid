@@ -123,6 +123,26 @@ func TestNewSignerInvalid(t *testing.T) {
 	}
 }
 
+// TestNewSignerArmorEdgeCases covers the armor decoder itself: a
+// truncated armor block and a payload that is not base64 must fail
+// instead of producing a signer over garbage.
+func TestNewSignerArmorEdgeCases(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{
+		"unterminated armor": openSSHArmorBegin + "\nQUJD", // no END line
+		"bad base64":         openSSHArmorBegin + "\n!!!not base64!!!\n" + openSSHArmorEnd + "\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(t.TempDir(), "key")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewSigner(path); err == nil {
+			t.Errorf("%s: accepted invalid armor", name)
+		}
+	}
+}
+
 func TestSignerSignLine(t *testing.T) {
 	t.Parallel()
 	pub, key, err := ed25519.GenerateKey(rand.Reader)

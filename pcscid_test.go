@@ -2,6 +2,7 @@ package pcscid
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"slices"
@@ -436,5 +437,54 @@ func TestKindString(t *testing.T) {
 	}
 	if Kind(200).String() == "insert" {
 		t.Error("unknown kind renders as insert")
+	}
+}
+
+// TestWatchAgainstAllDaemonGenerations drives the whole Watch pipeline
+// against every fake daemon generation: the pcscd 2.x flow (offered
+// 4.5), the pcsc-lite 1.8.24+ flow (offered 4.4) and the old daemon
+// flow (offered 2, forcing the client downgrade to 4.2 and the old
+// wait body). The card identity must be identical on all three.
+func TestWatchAgainstAllDaemonGenerations(t *testing.T) {
+	t.Parallel()
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	want := Btag("mifare classic 1k", uid)
+	for _, minor := range []uint32{2, 4, 5} {
+		t.Run(fmt.Sprintf("minor%d", minor), func(t *testing.T) {
+			t.Parallel()
+			fake := newFake(t)
+			fake.OfferedMinor = minor
+			events, _ := watchFake(t, fake)
+			fake.InsertCard("ACS ACR122U 00 00", mifareATR, uid)
+			ev := receiveEvent(t, events, 3*time.Second)
+			if ev.Kind != KindInsert || ev.Card == nil {
+				t.Fatalf("event = %+v, want an insertion", ev)
+			}
+			if ev.Card.ID != want {
+				t.Errorf("ID = %q, want %q", ev.Card.ID, want)
+			}
+			if ev.Card.Source != "uid" {
+				t.Errorf("Source = %q, want uid", ev.Card.Source)
+			}
+		})
+	}
+}
+
+// TestNormalizeReaderName pins the hotplug index stripping: trailing
+// space separated one or two digit groups go, everything else stays.
+func TestNormalizeReaderName(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"ACS ACR122U 01 00 00": "ACS ACR122U",
+		"ACS ACR122U 1 2":      "ACS ACR122U",
+		"ACS ACR122U":          "ACS ACR122U",
+		"SCM SCL011 007":       "SCM SCL011 007", // three digits is a name part, not an index
+		"Reader  ":             "Reader  ",       // trailing space, no group to strip
+		"00":                   "00",             // no space separated group, kept as is
+	}
+	for name, want := range cases {
+		if got := normalizeReaderName(name); got != want {
+			t.Errorf("normalizeReaderName(%q) = %q, want %q", name, got, want)
+		}
 	}
 }
