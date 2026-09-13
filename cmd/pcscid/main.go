@@ -12,6 +12,11 @@
 // SSE stream plus a polling fallback, so browser pages that cannot
 // open the pcscd Unix socket can react to card scans. The address
 // must be loopback unless PCSCID_HTTP_ALLOW_REMOTE=1 lifts the guard.
+//
+// With PCSCID_SIGN_KEY set to the path of a usable, passphrase-less
+// ssh-ed25519 private key, every output line is extended by '$' and
+// the base64 SSHSIG signature of the line itself, verifiable with
+// ssh-keygen -Y verify under the namespace "pcscid".
 package main
 
 import (
@@ -80,6 +85,21 @@ func run() error {
 		}()
 	}
 
+	// The SSHSIG signer: when PCSCID_SIGN_KEY points at a usable
+	// ssh-ed25519 private key, every output line carries '$' and the
+	// base64 signature of the line itself, so downstream consumers can
+	// prove each line came from this kiosk. A configured but unusable
+	// key fails the startup instead of silently unsigned output.
+	var signer *pcscid.Signer
+	if keyPath := os.Getenv("PCSCID_SIGN_KEY"); keyPath != "" {
+		s, err := pcscid.NewSigner(keyPath)
+		if err != nil {
+			return fmt.Errorf("PCSCID_SIGN_KEY: %w", err)
+		}
+		signer = s
+		logger.Debug("line signatures enabled", "key", keyPath)
+	}
+
 	events, err := pcscid.Watch(ctx, &pcscid.Options{Logger: logger})
 	if err != nil {
 		return err
@@ -88,7 +108,11 @@ func run() error {
 		if ev.Kind != pcscid.KindInsert {
 			continue
 		}
-		fmt.Println("#" + pcscid.ReaderTag(ev.Reader) + ":" + ev.Card.ID)
+		line := "#" + pcscid.ReaderTag(ev.Reader) + ":" + ev.Card.ID
+		if signer != nil {
+			line = signer.SignLine(line)
+		}
+		fmt.Println(line)
 		if bridge != nil {
 			bridge.Feed(ev)
 		}

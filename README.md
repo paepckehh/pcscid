@@ -70,6 +70,29 @@ time=... level=DEBUG msg="card inserted" reader="ACS ACR122U 00 00" \
 
 `./pcscid -version` prints the build-time semver (injected from the latest git tag by `make build`).
 
+## Signed output lines
+
+Set `PCSCID_SIGN_KEY` to the path of a usable, passphrase-less **ssh-ed25519** private key and every output line is extended by `$` and the base64 SSHSIG signature of the line itself, the signature format of `ssh-keygen -Y sign`:
+
+```console
+$ PCSCID_SIGN_KEY=/etc/pcscid/id_ed25519 ./pcscid
+#qr-xlrk-i5:r3v-401-5gmr$U1NIU0lHAAAAAQAAA…
+```
+
+A kiosk's consumers can prove every line came from that machine: the signature covers the exact bytes of the line, the namespace is `pcscid`. Verify with the stock ssh-keygen (the base64 blob is the armored block's payload):
+
+```console
+$ line='#qr-xlrk-i5:r3v-401-5gmr$U1NIU0lHAAAAAQAAA…'
+$ printf '%s' "${line%%$*}" > msg
+$ (echo "-----BEGIN SSH SIGNATURE-----"; \
+    echo "${line#*$}" | fold -w 70; echo "-----END SSH SIGNATURE-----") > sig
+$ echo "kiosk $(cat id_ed25519.pub)" > allowed_signers
+$ ssh-keygen -Y verify -f allowed_signers -I kiosk -n pcscid -s sig < msg
+Good "pcscid" signature for kiosk with ED25519 key SHA256:…
+```
+
+A configured but unusable key (encrypted, wrong type, damaged) fails the startup instead of silently producing unsigned output.
+
 ## Bridge mode: loopback HTTP for browser pages
 
 A browser sandbox cannot open `/run/pcscd/pcscd.comm` — no Unix sockets from WASM or page JavaScript, no WebUSB/WebHID in Firefox. Set `PCSCID_HTTP_ADDR` and the same binary additionally serves every presentation's **reader tag** and **btag** as loopback HTTP, CORS-permissive so an HTTPS kiosk page may read `http://127.0.0.1:8976` without mixed content trouble:

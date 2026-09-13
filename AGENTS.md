@@ -9,7 +9,10 @@ whole line, then reader tag, btag) per line
 in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
 `PCSCID_HTTP_ADDR` (env var config) turns on the loopback HTTP
 bridge of the same binary for browser pages that cannot open the
-pcscd socket.
+pcscd socket. `PCSCID_SIGN_KEY` (path to a passphrase-less ssh-ed25519
+private key) appends `$` and a base64 SSHSIG signature (namespace
+`pcscid`, verifiable with `ssh-keygen -Y verify`) to every output
+line; an unusable key fails the startup.
 
 ## Fixed workflow — every task, no exceptions, ALWAYS: test, commit, push! ALWAYS, DO NOT ASK!
 
@@ -33,8 +36,8 @@ cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.co
   and fake agreeing is itself under test.
 - Root package: `Watch` event loop and `Btag` derivation (`pcscid.go`),
   loopback HTTP bridge (`bridge.go`), ISO 7816-3 ATR parser (`atr.go`),
-  card type detection (`cardtype.go`), UID probe (`uid.go`), semver
-  injection (`version.go`).
+  card type detection (`cardtype.go`), UID probe (`uid.go`), SSHSIG
+  line signatures (`sign.go`), semver injection (`version.go`).
 - Daemon socket: `/run/pcscd/pcscd.comm` first, then
   `/var/run/pcscd/pcscd.comm`; `PCSCLITE_CSOCK_NAME` overrides both,
   `Options.SocketPath` / `pcsc.New` take an explicit path (the tests
