@@ -132,8 +132,8 @@ func TestDetectTypeKnownATRListMatchesFixtures(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	t.Parallel()
-	// Without linker injection and without VCS build info the
-	// fallback is "dev".
+	// Without linker injection the fallback is the VCS revision or
+	// the current tag (defaultVersion).
 	if Version() == "" {
 		t.Error("Version() is empty")
 	}

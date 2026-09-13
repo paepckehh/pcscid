@@ -15,7 +15,8 @@ func TestVersionInjected(t *testing.T) {
 }
 
 // TestVersionFallback asserts Version always answers with something
-// usable: injected semver, VCS revision or the plain "dev" fallback.
+// usable: injected semver, VCS revision or the current tag fallback
+// (defaultVersion).
 func TestVersionFallback(t *testing.T) {
 	saved := version
 	version = ""

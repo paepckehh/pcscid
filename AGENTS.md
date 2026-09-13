@@ -16,6 +16,12 @@ line; an unusable key fails the startup.
 
 ## Fixed workflow — every task, no exceptions, ALWAYS: test, commit, push! ALWAYS, DO NOT ASK!
 
+0. **Semver fallback (hardwired, every code update, no exceptions)**:
+   keep `defaultVersion` in `version.go` equal to the tag the update
+   will receive (`v0.0.<N+1>`, the next patch bump), so a plain
+   `go build` without `-ldflags` still reports the current release
+   tag instead of "dev" when no link time semver and no VCS build
+   info is present.
 1. **Format + check**: `gofmt -s -w . && go vet ./... && go mod tidy`
 2. **Build**: `make build` (injects the git semver via `-ldflags`)
 3. **Test**: `make test` (fully parallel, hardware free)
