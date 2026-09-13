@@ -197,6 +197,10 @@ func (b *Bridge) ServeListener(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{
 		Handler:           b.Handler(),
 		ReadHeaderTimeout: bridgeReadHeaderTimeout,
+		// Requests share the Serve ctx: cancelling it ends the long
+		// lived SSE streams too, so Shutdown does not have to time
+		// out on them.
+		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -206,7 +210,12 @@ func (b *Bridge) ServeListener(ctx context.Context, ln net.Listener) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// Belt and braces: a handler ignoring its request
+			// context must not outlive ServeListener either.
+			srv.Close()
+		}
+		return nil
 	case err := <-errCh:
 		return err
 	}

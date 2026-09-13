@@ -1,10 +1,11 @@
 // Command pcscid prints a short unique identifier for every smart
 // card presented to any reader registered with the local pcscd.
 //
-// In normal mode it prints the bare identifier and a newline, nothing
-// else, one line per card presentation. With DEBUG=1 in the
-// environment it logs a full verbose trace of every protocol step to
-// stderr while stdout stays machine readable.
+// In normal mode stdout carries one line per card presentation and
+// nothing else: a '#' mark, the reader tag, a colon and the btag. A
+// version banner always goes to stderr; with DEBUG=1 in the
+// environment stderr additionally carries a full verbose trace of
+// every protocol step, while stdout stays machine readable.
 //
 // With PCSCID_HTTP_ADDR set to a listen address, for example
 // "127.0.0.1:8976", it additionally serves the loopback HTTP bridge

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -240,6 +241,52 @@ func TestBridgeServeShutdown(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve must return after the context is cancelled")
+	}
+}
+
+// TestBridgeServeShutdownWithOpenStream pins the graceful shutdown
+// while an SSE client is connected: cancelling the Serve ctx must end
+// the stream and ServeListener must still return nil, promptly,
+// instead of timing out on the long lived connection.
+func TestBridgeServeShutdownWithOpenStream(t *testing.T) {
+	t.Parallel()
+	b := NewBridge(nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.ServeListener(ctx, ln) }()
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/events")
+	if err != nil {
+		t.Fatalf("events stream: %v", err)
+	}
+	defer resp.Body.Close()
+	hello := make([]byte, 1)
+	if _, err := io.ReadFull(resp.Body, hello); err != nil {
+		t.Fatalf("stream must deliver the hello event: %v", err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeListener = %v, want nil on cancel with an open stream", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("an open SSE stream must not delay or fail the shutdown")
+	}
+	closed := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, resp.Body)
+		closed <- err
+	}()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the stream must be closed once the context is cancelled")
 	}
 }
 

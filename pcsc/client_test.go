@@ -68,6 +68,26 @@ func TestClientStatesEmpty(t *testing.T) {
 	}
 }
 
+// TestClientNilLogger pins the documented nil logger: New must accept it
+// (it disables the protocol debug trace) instead of panicking on the
+// first debug line of a successful connection.
+func TestClientNilLogger(t *testing.T) {
+	t.Parallel()
+	fake, err := pcscfake.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fake.Close() })
+	cl, err := New(fake.Addr(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cl.Close() })
+	if _, err := cl.States(); err != nil {
+		t.Fatalf("states: %v", err)
+	}
+}
+
 func TestClientStatesWithCard(t *testing.T) {
 	t.Parallel()
 	cl, fake := newTestClient(t)

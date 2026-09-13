@@ -6,7 +6,6 @@ package pcsc
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 )
 
@@ -31,7 +30,7 @@ const (
 	cmdWaitReaderStateChange uint32 = 0x13
 	// cmdStopWaitingReaderStateChange unblocks a pending
 	// cmdWaitReaderStateChange, it is the timeout and cancel path of
-	// the protocol 4.5+ reader state wait.
+	// the protocol 4.4+ reader state wait.
 	cmdStopWaitingReaderStateChange uint32 = 0x14
 )
 
@@ -52,29 +51,9 @@ func writeMessage(w io.Writer, command uint32, body []byte) error {
 	return err
 }
 
-// readMessage reads a [size][command][body] framed message. Body
-// length is taken from the header, not from a caller expectation.
-func readMessage(r io.Reader) (command uint32, body []byte, err error) {
-	var head [8]byte
-	if _, err = io.ReadFull(r, head[:]); err != nil {
-		return 0, nil, err
-	}
-	size := binary.LittleEndian.Uint32(head[0:4])
-	command = binary.LittleEndian.Uint32(head[4:8])
-	if size > 1<<20 {
-		return command, nil, fmt.Errorf("pcsc: oversized message body %d", size)
-	}
-	body = make([]byte, size)
-	if size > 0 {
-		if _, err = io.ReadFull(r, body); err != nil {
-			return command, nil, err
-		}
-	}
-	return command, body, nil
-}
-
-// readRaw reads an unframed body, used by the header-less CMD_VERSION
-// response of the daemon.
+// readRaw reads a fixed size, header-less response body. The daemon
+// answers every command with the raw message struct, without the
+// [size][command] frame of a request.
 func readRaw(r io.Reader, size int) ([]byte, error) {
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(r, buf); err != nil {

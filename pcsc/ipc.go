@@ -47,8 +47,12 @@ type ipcClient struct {
 }
 
 // dialIPC connects to a pcscd daemon socket, performs the version
-// handshake and establishes the context.
+// handshake and establishes the context. A nil logger disables the
+// protocol debug trace.
 func dialIPC(socketPath string, logger *slog.Logger) (*ipcClient, error) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	var conn net.Conn
 	var path string
 	var lastErr error

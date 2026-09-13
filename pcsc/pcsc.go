@@ -60,7 +60,8 @@ func (c *Client) ServerVersion() (major, minor uint32) {
 }
 
 // States returns the current state of all registered readers, including
-// the ATR of a present card. It never blocks.
+// the ATR of a present card. It answers with the current snapshot, it
+// never waits for a change, that is WaitChange.
 func (c *Client) States() ([]ReaderState, error) {
 	return c.ipc.states()
 }

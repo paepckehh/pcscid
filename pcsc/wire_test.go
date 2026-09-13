@@ -6,8 +6,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"io"
-	"strings"
 	"testing"
 )
 
@@ -32,61 +30,6 @@ func TestWriteMessageEmptyBody(t *testing.T) {
 	want := []byte{0, 0, 0, 0, 0x12, 0, 0, 0}
 	if !bytes.Equal(buf.Bytes(), want) {
 		t.Errorf("writeMessage = % X, want % X", buf.Bytes(), want)
-	}
-}
-
-func TestReadMessageFraming(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   []byte
-		cmd  uint32
-		body []byte
-		err  string
-	}{
-		{
-			name: "body roundtrip",
-			in:   []byte{4, 0, 0, 0, 0x09, 0, 0, 0, 0xAA, 0xBB, 0xCC, 0xDD},
-			cmd:  0x09,
-			body: []byte{0xAA, 0xBB, 0xCC, 0xDD},
-		},
-		{
-			name: "empty body",
-			in:   []byte{0, 0, 0, 0, 0x12, 0, 0, 0},
-			cmd:  0x12,
-			body: []byte{},
-		},
-		{
-			name: "oversized body",
-			in:   []byte{0x00, 0x00, 0x20, 0x00, 0x11, 0, 0, 0},
-			err:  "pcsc: oversized message body",
-		},
-		{
-			name: "truncated header",
-			in:   []byte{1, 2, 3},
-			err:  io.ErrUnexpectedEOF.Error(),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			cmd, body, err := readMessage(bytes.NewReader(tt.in))
-			if tt.err != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.err) {
-					t.Fatalf("readMessage(% X) error = %v, want containing %q", tt.in, err, tt.err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("readMessage(% X): %v", tt.in, err)
-			}
-			if cmd != tt.cmd {
-				t.Errorf("command = 0x%02X, want 0x%02X", cmd, tt.cmd)
-			}
-			if !bytes.Equal(body, tt.body) {
-				t.Errorf("body = % X, want % X", body, tt.body)
-			}
-		})
 	}
 }
 
