@@ -4,8 +4,8 @@
 (Go 1.25+). Library plus sample app that use the local pcscd service
 to identify any presented card (NFC, mifare, RFID, eID, contact cards,
 anything pcscd manages) with a short unique btag per individual card.
-`cmd/pcscid` prints `xxx-xx:#<btag>` (reader tag, `#` marks
-the start of the btag) per line
+`cmd/pcscid` prints `#xxx-xx:xxx-xxx-xxxx` (`#` prefixes the
+whole line, then reader tag, btag) per line
 in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
 `PCSCID_HTTP_ADDR` (env var config) turns on the loopback HTTP
 bridge of the same binary for browser pages that cannot open the

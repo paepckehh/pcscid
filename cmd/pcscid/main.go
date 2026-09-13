@@ -88,7 +88,7 @@ func run() error {
 		if ev.Kind != pcscid.KindInsert {
 			continue
 		}
-		fmt.Println(pcscid.ReaderTag(ev.Reader) + ":#" + ev.Card.ID)
+		fmt.Println("#" + pcscid.ReaderTag(ev.Reader) + ":" + ev.Card.ID)
 		if bridge != nil {
 			bridge.Feed(ev)
 		}
