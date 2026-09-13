@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -42,7 +43,7 @@ func run() error {
 	}
 
 	var logger *slog.Logger
-	if debugEnabled() {
+	if envEnabled("DEBUG") {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level: slog.LevelDebug,
 		}))
@@ -58,17 +59,22 @@ func run() error {
 	// The loopback HTTP bridge, off unless PCSCID_HTTP_ADDR configures
 	// it. A browser sandbox cannot open the pcscd Unix socket, so the
 	// bridge is the minimal local footprint for kiosk pages reacting
-	// to card scans.
+	// to card scans. The listener is bound here, so a bad address
+	// fails the startup instead of the background goroutine.
 	bridgeAddr := os.Getenv("PCSCID_HTTP_ADDR")
 	var bridge *pcscid.Bridge
 	if bridgeAddr != "" {
 		if err := pcscid.RequireLoopback(bridgeAddr, envEnabled("PCSCID_HTTP_ALLOW_REMOTE")); err != nil {
 			return err
 		}
+		ln, err := net.Listen("tcp", bridgeAddr)
+		if err != nil {
+			return fmt.Errorf("bridge listen on %q: %w", bridgeAddr, err)
+		}
 		bridge = pcscid.NewBridge(nil)
 		go func() {
 			logger.Debug("bridge listening", "addr", bridgeAddr)
-			if err := bridge.Serve(ctx, bridgeAddr); err != nil {
+			if err := bridge.ServeListener(ctx, ln); err != nil {
 				fmt.Fprintln(os.Stderr, "pcscid bridge:", err)
 			}
 		}()
@@ -88,13 +94,6 @@ func run() error {
 		}
 	}
 	return nil
-}
-
-// debugEnabled reports whether DEBUG requests the verbose trace.
-// DEBUG=1 is the documented spelling, any other non empty value
-// except 0 is accepted as well.
-func debugEnabled() bool {
-	return envEnabled("DEBUG")
 }
 
 // envEnabled reports whether the environment variable holds a truthy

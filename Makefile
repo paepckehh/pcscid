@@ -18,4 +18,4 @@ vet:
 	go vet ./...
 
 clean:
-	rm -f pcscid pcscbridge
+	rm -f pcscid

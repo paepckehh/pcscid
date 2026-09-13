@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -185,6 +186,22 @@ func TestBridgeEventsStream(t *testing.T) {
 	}
 	if !strings.Contains(got, "event: card") || !strings.Contains(got, "card000001") {
 		t.Fatalf("stream must carry the card event, got %q", got)
+	}
+}
+
+// TestBridgeDedupBounded pins the memory bound of the dedup table:
+// distinct pairs far beyond the limit keep passing and the table
+// stays bounded, so a kiosk serving new cards for weeks cannot leak.
+func TestBridgeDedupBounded(t *testing.T) {
+	t.Parallel()
+	dd := newBridgeDedup(20*time.Millisecond, 0)
+	for i := range bridgeDedupMax * 2 {
+		if !dd.allow("aaa-01", fmt.Sprintf("card%06d", i)) {
+			t.Fatalf("event %d inside a fresh burst must pass", i)
+		}
+	}
+	if len(dd.last) > bridgeDedupMax {
+		t.Fatalf("dedup table has %d entries, want at most %d", len(dd.last), bridgeDedupMax)
 	}
 }
 

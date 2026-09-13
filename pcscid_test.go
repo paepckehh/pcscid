@@ -76,6 +76,45 @@ func TestBtagProperties(t *testing.T) {
 	}
 }
 
+// TestBtagGolden pins the exact btag derivation. Btags are long lived
+// identifiers stored by consumers, the digest must never change
+// silently: any change here is a breaking release.
+func TestBtagGolden(t *testing.T) {
+	t.Parallel()
+	golden := []struct {
+		cardType string
+		tag      []byte
+		want     string
+	}{
+		{"mifare classic 1k", []byte{0x04, 0x11, 0x22, 0x33}, "r3v-401-5gmr"},
+		{"unknown", nil, "szf-6lf-34qs"},
+		{"german eid/passport (npa)", []byte{0x3B, 0x84, 0x80, 0x01, 0x80, 0x82, 0x90, 0x00, 0x97}, "wyo-gij-v6er"},
+	}
+	for _, g := range golden {
+		if got := Btag(g.cardType, g.tag); got != g.want {
+			t.Errorf("Btag(%q, % X) = %q, want %q", g.cardType, g.tag, got, g.want)
+		}
+	}
+}
+
+// TestReaderTagGolden pins the exact reader tag derivation for the
+// same reason as TestBtagGolden.
+func TestReaderTagGolden(t *testing.T) {
+	t.Parallel()
+	golden := []struct {
+		reader string
+		want   string
+	}{
+		{"ACS ACR122U 01 00 00", "qrx-lr"},
+		{"SCM Microsystems Inc. SCL011", "nt1-ox"},
+	}
+	for _, g := range golden {
+		if got := ReaderTag(g.reader); got != g.want {
+			t.Errorf("ReaderTag(%q) = %q, want %q", g.reader, got, g.want)
+		}
+	}
+}
+
 func TestReaderTagProperties(t *testing.T) {
 	t.Parallel()
 	reader := "ACS ACR122U 00 00"

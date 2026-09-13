@@ -103,6 +103,18 @@ func btagFormat(sum []byte, n int, dashes ...int) string {
 	return string(id)
 }
 
+// digestID returns the SHA-256 digest of the domain separated identity
+// parts, concatenated in order.
+func digestID(parts ...[]byte) [sha256.Size]byte {
+	h := sha256.New()
+	for _, part := range parts {
+		h.Write(part)
+	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	return sum
+}
+
 // Btag derives the btag, the short unique identifier of a card,
 // from its type and the unique tag of the individual card, its UID,
 // or its ATR when no UID is available. The btag is 10 characters from
@@ -110,9 +122,7 @@ func btagFormat(sum []byte, n int, dashes ...int) string {
 // xxx-xxx-xxxx, stable across readers and re-presentations, and
 // different for two cards of the same type with different tags.
 func Btag(cardType string, tag []byte) string {
-	sum := sha256.Sum256(append(
-		append(append([]byte("pcscid/v1|"), cardType...), '|'),
-		tag...))
+	sum := digestID([]byte("pcscid/v1|"), []byte(cardType), []byte("|"), tag)
 	return btagFormat(sum[:], 10, 3, 6)
 }
 
@@ -129,7 +139,7 @@ func Btag(cardType string, tag []byte) string {
 // not its point of attachment. Two identical reader models share one
 // tag, there is no serial number in the daemon protocol.
 func ReaderTag(reader string) string {
-	sum := sha256.Sum256(append([]byte("pcscid/reader/v1|"), normalizeReaderName(reader)...))
+	sum := digestID([]byte("pcscid/reader/v1|"), []byte(normalizeReaderName(reader)))
 	return btagFormat(sum[:], 5, 3)
 }
 

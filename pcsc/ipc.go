@@ -46,10 +46,8 @@ type ipcClient struct {
 	log     *slog.Logger
 }
 
-func newBackend(socketPath string, logger *slog.Logger) (backend, error) {
-	return dialIPC(socketPath, logger)
-}
-
+// dialIPC connects to a pcscd daemon socket, performs the version
+// handshake and establishes the context.
 func dialIPC(socketPath string, logger *slog.Logger) (*ipcClient, error) {
 	var conn net.Conn
 	var path string
@@ -160,10 +158,6 @@ func (c *ipcClient) exchange(command uint32, body []byte, expectResp int) error 
 
 func (c *ipcClient) setDeadline(d time.Duration) error {
 	return c.conn.SetDeadline(time.Now().Add(d))
-}
-
-func (c *ipcClient) version() (major, minor uint32) {
-	return c.major, c.minor
 }
 
 func (c *ipcClient) states() ([]ReaderState, error) {
@@ -321,10 +315,7 @@ func (c *ipcClient) connect(reader string, preferred uint32) (*Card, error) {
 	if resp.rv != 0 {
 		return nil, Error(resp.rv)
 	}
-	return &Card{
-		backend:  &ipcCard{client: c, handle: resp.card, protocol: resp.activeProtocol},
-		protocol: resp.activeProtocol,
-	}, nil
+	return &Card{ipc: &ipcCard{client: c, handle: resp.card, protocol: resp.activeProtocol}}, nil
 }
 
 func (c *ipcClient) close() error {
@@ -385,6 +376,12 @@ func (c *ipcCard) transmit(apdu []byte, maxResp int) ([]byte, error) {
 	resp := decodeTransmit(rspBody)
 	if resp.rv != 0 {
 		return nil, Error(resp.rv)
+	}
+	// A daemon must never answer with more than the short APDU
+	// buffer, a larger length would be a protocol violation and must
+	// not turn into a giant allocation.
+	if resp.recvLength > maxBufferSize {
+		return nil, fmt.Errorf("pcsc: transmit response length %d exceeds the %d byte short APDU buffer", resp.recvLength, maxBufferSize)
 	}
 	data, err := readRaw(c.client.conn, int(resp.recvLength))
 	if err != nil {

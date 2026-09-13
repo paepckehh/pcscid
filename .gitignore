@@ -2,3 +2,7 @@
 *.out
 *.test
 coverage.*
+
+# other
+.attic 
+.crushrc

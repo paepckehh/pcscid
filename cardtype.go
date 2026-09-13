@@ -1,6 +1,10 @@
 package pcscid
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/hex"
+	"strings"
+)
 
 // pcscRID is the PC/SC Workgroup registered application provider
 // identifier that contactless readers place in the ATR historical
@@ -117,11 +121,7 @@ func DetectType(atr []byte) string {
 	return "pc/sc contactless, unspecified"
 }
 
+// hexUpper renders b as upper case hex, the key format of knownATR.
 func hexUpper(b []byte) string {
-	const digits = "0123456789ABCDEF"
-	out := make([]byte, 0, len(b)*2)
-	for _, v := range b {
-		out = append(out, digits[v>>4], digits[v&0x0F])
-	}
-	return string(out)
+	return strings.ToUpper(hex.EncodeToString(b))
 }

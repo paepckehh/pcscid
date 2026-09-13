@@ -14,7 +14,11 @@
 // Loopback is a potentially trustworthy origin, so a page served over
 // HTTPS may read the plain http://127.0.0.1:PORT answers without mixed
 // content trouble. RequireLoopback guards the default deployment posture:
-// card identities must never leave the kiosk by accident.
+// card identities must never leave the kiosk by accident. The permissive
+// CORS is a deliberate trade-off for kiosk pages from any HTTPS origin:
+// it also means every page open in a browser on the kiosk itself can
+// read the stream, the bridge must only ever run on a locked-down
+// terminal.
 
 package pcscid
 
@@ -41,6 +45,13 @@ const (
 	// the "cards already present" report of Watch never triggers an
 	// HTTP event after a service restart with a card left on a reader.
 	bridgeStartupGrace = 2 * time.Second
+	// bridgeDedupMax bounds the dedup memory: beyond that many distinct
+	// reader+card pairs the stale entries are pruned, so a kiosk serving
+	// many different cards for weeks cannot leak.
+	bridgeDedupMax = 1024
+	// bridgeReadHeaderTimeout bounds an HTTP request head, a guard
+	// against slowloris style stalls of the single bridge listener.
+	bridgeReadHeaderTimeout = 10 * time.Second
 )
 
 // BridgeOptions tunes NewBridge. A nil *BridgeOptions selects every
@@ -171,10 +182,25 @@ func (b *Bridge) Handler() http.Handler {
 // RequireLoopback should be consulted first, Serve itself does not
 // guard the address.
 func (b *Bridge) Serve(ctx context.Context, addr string) error {
-	srv := &http.Server{Addr: addr, Handler: b.Handler()}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("bridge listen on %q: %w", addr, err)
+	}
+	return b.ServeListener(ctx, ln)
+}
+
+// ServeListener serves the bridge HTTP surface on an already bound
+// listener until ctx is cancelled (graceful shutdown, a nil return)
+// or the listener fails. Binding the listener in the caller makes a
+// bad address fail fast instead of asynchronously.
+func (b *Bridge) ServeListener(ctx context.Context, ln net.Listener) error {
+	srv := &http.Server{
+		Handler:           b.Handler(),
+		ReadHeaderTimeout: bridgeReadHeaderTimeout,
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.ListenAndServe()
+		errCh <- srv.Serve(ln)
 	}()
 	select {
 	case <-ctx.Done():
@@ -320,6 +346,19 @@ func (d *bridgeDedup) allow(reader, card string) bool {
 	if t, ok := d.last[key]; ok && now.Sub(t) < d.window {
 		d.last[key] = now
 		return false
+	}
+	if len(d.last) >= bridgeDedupMax {
+		// The pair table is bounded: drop the stale entries, and if a
+		// burst keeps them all fresh, drop the table entirely, the
+		// window is a few seconds of history at most.
+		for k, t := range d.last {
+			if now.Sub(t) >= d.window {
+				delete(d.last, k)
+			}
+		}
+		if len(d.last) >= bridgeDedupMax {
+			clear(d.last)
+		}
 	}
 	d.last[key] = now
 	return true

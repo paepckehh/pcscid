@@ -275,6 +275,9 @@ func (s *Server) negotiate(conn net.Conn) bool {
 func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool, err error) {
 	switch command {
 	case cmdEstablishContext:
+		if len(body) != 12 {
+			return true, fmt.Errorf("pcscfake: establish body %d bytes, want 12", len(body))
+		}
 		resp := make([]byte, 12)
 		copy(resp[0:4], body[0:4]) // scope
 		binary.LittleEndian.PutUint32(resp[4:], 1)
@@ -283,7 +286,10 @@ func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool
 		return false, err
 
 	case cmdReleaseContext:
-		_, err := conn.Write(body[:8])
+		if len(body) != 8 {
+			return true, fmt.Errorf("pcscfake: release body %d bytes, want 8", len(body))
+		}
+		_, err := conn.Write(body)
 		return true, err
 
 	case cmdGetReadersState:
@@ -319,16 +325,25 @@ func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool
 		return false, nil
 
 	case cmdConnect:
+		if len(body) != 152 {
+			return true, fmt.Errorf("pcscfake: connect body %d bytes, want 152", len(body))
+		}
 		return false, s.connect(conn, body)
 
 	case cmdTransmit:
+		if len(body) != 32 {
+			return true, fmt.Errorf("pcscfake: transmit body %d bytes, want 32", len(body))
+		}
 		return false, s.transmit(conn, body)
 
 	case cmdDisconnect:
+		if len(body) != 12 {
+			return true, fmt.Errorf("pcscfake: disconnect body %d bytes, want 12", len(body))
+		}
 		s.mu.Lock()
 		delete(s.cards, binary.LittleEndian.Uint32(body[0:4]))
 		s.mu.Unlock()
-		_, err := conn.Write(body[:12])
+		_, err := conn.Write(body)
 		return false, err
 	}
 	return true, fmt.Errorf("pcscfake: unknown command 0x%02X", command)
@@ -347,16 +362,10 @@ func (s *Server) register(conn net.Conn) {
 // the daemon serializes both through its client list lock the same
 // way.
 func (s *Server) registerAndDump(conn net.Conn) error {
-	buf := make([]byte, maxReaders*readerStateWireSz)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.waiters[conn] = struct{}{}
-	for i, name := range slices.Sorted(maps.Keys(s.readers)) {
-		if i >= maxReaders {
-			break
-		}
-		encodeReaderStateInto(buf[i*readerStateWireSz:], name, s.readers[name])
-	}
+	buf := s.encodeStatesLocked()
+	s.mu.Unlock()
 	_, err := conn.Write(buf)
 	return err
 }
@@ -373,17 +382,25 @@ func (s *Server) unregister(conn net.Conn) bool {
 
 // writeStates answers with the raw 16 entry reader state array.
 func (s *Server) writeStates(conn net.Conn) error {
-	buf := make([]byte, maxReaders*readerStateWireSz)
 	s.mu.Lock()
+	buf := s.encodeStatesLocked()
+	s.mu.Unlock()
+	_, err := conn.Write(buf)
+	return err
+}
+
+// encodeStatesLocked packs the current reader set into the fixed 16
+// entry READER_STATE array, zero padded, sorted by reader name. The
+// server lock must be held.
+func (s *Server) encodeStatesLocked() []byte {
+	buf := make([]byte, maxReaders*readerStateWireSz)
 	for i, name := range slices.Sorted(maps.Keys(s.readers)) {
 		if i >= maxReaders {
 			break
 		}
 		encodeReaderStateInto(buf[i*readerStateWireSz:], name, s.readers[name])
 	}
-	s.mu.Unlock()
-	_, err := conn.Write(buf)
-	return err
+	return buf
 }
 
 func (s *Server) connect(conn net.Conn, body []byte) error {
@@ -517,6 +534,9 @@ func readMessage(r io.Reader) (command uint32, body []byte, err error) {
 	}
 	size := binary.LittleEndian.Uint32(head[0:4])
 	command = binary.LittleEndian.Uint32(head[4:8])
+	if size > 1<<20 {
+		return command, nil, fmt.Errorf("pcscfake: oversized message body %d", size)
+	}
 	body = make([]byte, size)
 	if size > 0 {
 		if _, err = io.ReadFull(r, body); err != nil {
