@@ -55,6 +55,38 @@ bbc-7t: r3v-401-5gmr
 
 `./pcscid -version` prints the build-time semver, which the Makefile injects via `-ldflags` from the latest git tag.
 
+## Bridge mode: loopback HTTP for browser pages
+
+A browser sandbox cannot reach `/run/pcscd/pcscd.comm` — neither WebAssembly nor page JavaScript may open Unix sockets, and Firefox implements neither WebUSB nor WebHID. Set the environment variable `PCSCID_HTTP_ADDR` and the same binary additionally serves every card presentation's **reader tag** (`xxx-xx`) and **btag** (`xxx-xxx-xxxx`) as loopback HTTP, CORS-permissive so an HTTPS kiosk page may read `http://127.0.0.1:8976`:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | `{"ok":true,"version":...}` liveness probe |
+| `GET /events` | SSE stream (hello event, then one `card` event per scan, 20 s keep-alive) |
+| `GET /pending?after=N` | JSON `{events:[...]}` polling fallback, replay by monotonic cursor |
+
+| Variable | Effect |
+| --- | --- |
+| `PCSCID_HTTP_ADDR` | Listen address of the bridge, e.g. `127.0.0.1:8976`. Empty (the default) disables bridge mode — plain CLI output only |
+| `PCSCID_HTTP_ALLOW_REMOTE` | `1` lifts the loopback guard; without it only loopback addresses are accepted, so card identities can never leave the kiosk by accident |
+
+The bridge suppresses the initial "cards already present" report with a 2 s startup grace, so a card left on a reader never serves an event after a service restart, and debounces the same reader+card pair for 3 s. `scripts/pcscid-bridge.service` is the ready-made systemd unit (`After=pcscd`).
+
+```console
+$ PCSCID_HTTP_ADDR=127.0.0.1:8976 ./pcscid
+bbc-7t: r3v-401-5gmr
+```
+
+The feature is a library piece too: feed a `pcscid.Bridge` from any event loop and serve it yourself.
+
+```go
+bridge := pcscid.NewBridge(nil)            // ring buffer, dedup and grace defaults
+go bridge.Serve(ctx, "127.0.0.1:8976")      // or mount bridge.Handler() anywhere
+for ev := range events {
+	bridge.Feed(ev)                        // inserts become {reader tag, btag} events
+}
+```
+
 ## Use the library
 
 ```go
@@ -119,14 +151,16 @@ $ git clone https://paepcke.de/pcscid && make build  # from source, with semver 
 ## Project layout
 
 ```text
-cmd/pcscid/       sample app: bare btags in normal mode, full trace with DEBUG=1
+cmd/pcscid/       sample app: bare btags in normal mode, full trace with DEBUG=1, loopback HTTP bridge with PCSCID_HTTP_ADDR
 pcsc/             pure Go pcscd wire-protocol client (Linux)
 internal/pcscfake in-process fake pcscd daemon driving the hardware-free tests
 pcscid.go         Watch loop, event model, identification
+bridge.go         loopback HTTP bridge: SSE + polling of reader tags and btags for browser pages
 atr.go            ISO 7816-3 answer-to-reset parser
 cardtype.go       ATR to card type detection (PC/SC part 3 table, known ATRs)
 uid.go            UID pseudo-APDU probe
 version.go        semver via go linker -ldflags injection
+scripts/          systemd unit for bridge mode on a kiosk (pcscid-bridge.service)
 ```
 
 ## Testing

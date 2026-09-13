@@ -1,0 +1,38 @@
+# pcscid bridge mode — loopback HTTP bridge from pcscd to a kiosk browser
+# page. Runs the same pcscid binary with PCSCID_HTTP_ADDR set, so every
+# card presentation's reader tag (xxx-xx) and card btag (xxx-xxx-xxxx) are
+# served on http://127.0.0.1:8976 (loopback only). Install next to the
+# kiosk browser on the terminal:
+#
+#   sudo cp pcscid /usr/local/bin/
+#   sudo cp scripts/pcscid-bridge.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pcscid-bridge
+#
+# Build the binary with: make build
+[Unit]
+Description=pcscid bridge mode (pcscd card events as loopback SSE/polling for kiosk pages)
+Documentation=https://paepcke.de/pcscid
+Wants=pcscd.service
+After=pcscd.service network-online.target
+
+[Service]
+Type=simple
+Environment=PCSCID_HTTP_ADDR=127.0.0.1:8976
+ExecStart=/usr/local/bin/pcscid
+Restart=always
+RestartSec=2
+# Hardening: the bridge only needs the pcscd socket and its loopback listener.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+DevicePolicy=closed
+# pcscd itself is reached over its world-accessible socket in /run/pcscd;
+# readers are polled there, never opened directly.
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,9 @@ to identify any presented card (NFC, mifare, RFID, eID, contact cards,
 anything pcscd manages) with a short unique btag per individual card.
 `cmd/pcscid` prints `xxx-xx: <btag>` (reader tag, btag) per line
 in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
+`PCSCID_HTTP_ADDR` (env var config) turns on the loopback HTTP
+bridge of the same binary for browser pages that cannot open the
+pcscd socket.
 
 ## Fixed workflow — every task, no exceptions, ALWAYS: test, commit, push! ALWAYS, DO NOT ASK!
 
@@ -28,8 +31,9 @@ cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.co
   same wire protocol used as an in-process daemon for tests: client
   and fake agreeing is itself under test.
 - Root package: `Watch` event loop and `Btag` derivation (`pcscid.go`),
-  ISO 7816-3 ATR parser (`atr.go`), card type detection (`cardtype.go`),
-  UID probe (`uid.go`), semver injection (`version.go`).
+  loopback HTTP bridge (`bridge.go`), ISO 7816-3 ATR parser (`atr.go`),
+  card type detection (`cardtype.go`), UID probe (`uid.go`), semver
+  injection (`version.go`).
 - Daemon socket: `/run/pcscd/pcscd.comm` first, then
   `/var/run/pcscd/pcscd.comm`; `PCSCLITE_CSOCK_NAME` overrides both,
   `Options.SocketPath` / `pcsc.New` take an explicit path (the tests
@@ -60,6 +64,33 @@ index groups stripped (`normalizeReaderName`), so the same physical
 reader keeps its tag across machines, USB ports and daemon
 restarts; the daemon protocol carries no hardware serial, so two
 units of the same model share one tag.
+
+## Bridge mode (loopback HTTP, env var config)
+
+A browser sandbox cannot reach the pcscd socket (no Unix sockets from
+WASM/JS, no WebUSB/WebHID in Firefox, no raw sockets in WebExtensions),
+so `bridge.go` provides the minimal local footprint for kiosk pages:
+`pcscid.Bridge` feeds Watch insertions through the tag derivation
+(ReaderTag + Btag) and a dedup guard and serves them as SSE + polling
+JSON with permissive CORS (loopback is a potentially trustworthy
+origin, so the loopback http is not mixed content for an HTTPS page).
+
+- `PCSCID_HTTP_ADDR` in the sample app enables it (e.g.
+  `127.0.0.1:8976`); empty (the default) keeps the plain CLI output
+  only. `PCSCID_HTTP_ALLOW_REMOTE=1` lifts the loopback guard that
+  `RequireLoopback` enforces — card identities must never leave the
+  kiosk by accident.
+- Endpoints: `GET /health`, `GET /events` (SSE, hello + one `card`
+  event per scan, 20 s keep-alive) and `GET /pending?after=N` (JSON
+  replay by monotonic cursor; the ring retains 64 presentations).
+- Dedup semantics: a 2 s startup grace swallows Watch's initial
+  "cards already present" report (a card left on a reader never
+  triggers after a service restart) and the same reader+card pair is
+  suppressed for 3 s against prell events. Both are `BridgeOptions`,
+  defaults via `bridgeCapacity` / `bridgeDedupWindow` /
+  `bridgeStartupGrace`.
+- `scripts/pcscid-bridge.service` is the ready-made systemd unit
+  (After=pcscd) running the sample app with `PCSCID_HTTP_ADDR` set.
 
 ## Protocol gotchas, found empirically against pcscd 2.4.1
 
