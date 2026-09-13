@@ -22,7 +22,7 @@ No cgo. No `libpcsclite`. No dependencies. One static binary that talks the `pcs
 
 ```console
 $ ./pcscid
-qrx-lr: r3v-401-5gmr        # reader tag: card btag
+qrx-lr:#r3v-401-5gmr        # reader tag, # starts the btag
 ```
 
 ## Why pcscid
@@ -52,10 +52,10 @@ The derivation is a pure function of card type + tag: no timestamps, no reader n
 ```console
 $ make build
 $ ./pcscid
-qrx-lr: r3v-401-5gmr
+qrx-lr:#r3v-401-5gmr
 ```
 
-One line per presentation: the reader tag, a colon, the btag. Nothing else — stdout is machine readable by design.
+One line per presentation: the reader tag, a colon, `#`, the btag. Nothing else — stdout is machine readable by design; the `#` marks the start of the btag.
 
 `DEBUG=1` turns on a full verbose trace on stderr while stdout stays clean:
 
@@ -65,7 +65,7 @@ time=... level=DEBUG msg="pcscd connected" socket=/run/pcscd/pcscd.comm version=
 time=... level=DEBUG msg="card inserted" reader="ACS ACR122U 00 00" \
     id=r3v-401-5gmr reader-tag=qrx-lr type="mifare classic 1k" source=uid \
     uid="04 11 22 33" protocol=T=1
-qrx-lr: r3v-401-5gmr
+qrx-lr:#r3v-401-5gmr
 ```
 
 `./pcscid -version` prints the build-time semver (injected from the latest git tag by `make build`).
@@ -89,7 +89,7 @@ A 2 s startup grace swallows Watch's initial "cards already present" report (a c
 
 ```console
 $ PCSCID_HTTP_ADDR=127.0.0.1:8976 ./pcscid
-qrx-lr: r3v-401-5gmr
+qrx-lr:#r3v-401-5gmr
 ```
 
 ## Use the library
