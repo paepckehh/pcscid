@@ -8,6 +8,7 @@ info:
 	@echo "$(PROJECT) $(VERSION)"
 
 build:
+	touch $(PROJECT) && rm $(PROJECT)
 	go build -ldflags "$(LDFLAGS)" -o $(PROJECT) ./cmd/$(PROJECT)
 
 update:
@@ -17,6 +18,16 @@ update:
 push: update
 	git push
 	git push --tags
+
+deploy-test-nix: update build 
+	sudo -v
+	sudo systemctl stop $(PROJECT).service || true
+	sudo mkdir -p /nix/persist/bin || true
+	sudo touch /nix/persist/bin/$(PROJECT)-pilot || true
+	sudo cp -af /nix/persist/root/bin/$(PROJECT).old /nix/persist/root/bin/$(PROJECT).old2 || true 
+	sudo cp -af /nix/persist/root/bin/$(PROJECT) /nix/persist/root/bin/$(PROJECT).old || true 
+	sudo mv -f ./$(PROJECT) /nix/persist/root/bin/$(PROJECT) || true
+	sudo systemctl start $(PROJECT).service
 
 deps:
 	rm -rf go.mod go.sum
