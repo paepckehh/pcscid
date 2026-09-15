@@ -74,10 +74,19 @@ type Event struct {
 	Reader string
 	// ReaderSerial is the hardware serial number of the reader
 	// (SCARD_ATTR_VENDOR_IFD_SERIAL_NO, the USB iSerial string of the
-	// unit) when the driver serves it, empty otherwise. It is probed
-	// with the card connection of an insertion, so only insertions
-	// carry it. See ReaderTagWithSerial.
+	// unit) when the driver serves a usable one, empty otherwise.
+	// Constant vendor placeholders, for example the all zero serial of
+	// the ACS ACR122U family, are filtered and also answer empty. It is
+	// probed with the card connection of an insertion, so only
+	// insertions carry it. See ReaderTagWithUnit.
 	ReaderSerial string
+	// ReaderPort is the kernel physical USB port path of the reader
+	// (sysfs devpath, for example "2-1.3"), resolved through its
+	// SCARD_ATTR_CHANNEL_ID bus/device address when the driver serves
+	// no usable serial. It anchors the unit to its port: stable across
+	// daemon restarts and reboots, but moving the reader to another
+	// port changes it. Only insertions carry it.
+	ReaderPort string
 }
 
 // Options tunes Watch. A nil Options selects every default.
@@ -89,6 +98,11 @@ type Options struct {
 	// SocketPath overrides the pcscd socket path. Empty selects the
 	// platform default, PCSCLITE_CSOCK_NAME overrides it on Unix.
 	SocketPath string
+	// SysfsUSBRoot overrides the sysfs root scanned to resolve a
+	// reader's USB bus/device address to its physical port path,
+	// default /sys/bus/usb/devices. It exists to test the port based
+	// reader identity fallback against a fake device tree.
+	SysfsUSBRoot string
 }
 
 // btagAlphabet is the alphabet the btag and reader tag encode their
@@ -158,12 +172,33 @@ func ReaderTag(reader string) string {
 // USB ports and daemon restarts: the serial is burned into the reader
 // hardware. An empty serial falls back to the plain name based tag.
 func ReaderTagWithSerial(reader, serial string) string {
-	if serial == "" {
+	return ReaderTagWithUnit(reader, serial, "")
+}
+
+// ReaderTagWithUnit derives the reader tag from every per-unit fact
+// the driver could serve, in decreasing portability:
+//
+//   - a usable hardware serial (ReaderTagWithSerial semantics, hash
+//     domain pcscid/reader/v2): one tag per unit, portable across
+//     machines and USB ports.
+//   - the kernel physical USB port path (Event.ReaderPort, hash domain
+//     pcscid/reader/v3): one tag per unit as long as it stays in its
+//     port, stable across daemon restarts and reboots, but moving the
+//     reader or re-plugging it into another port changes the tag.
+//   - neither: the model level ReaderTag.
+func ReaderTagWithUnit(reader, serial, port string) string {
+	switch {
+	case serial != "":
+		sum := digestID([]byte("pcscid/reader/v2|"),
+			[]byte(normalizeReaderName(reader)), []byte("|"), []byte(serial))
+		return btagFormat(sum[:], 8, 2, 6)
+	case port != "":
+		sum := digestID([]byte("pcscid/reader/v3|"),
+			[]byte(normalizeReaderName(reader)), []byte("|"), []byte(port))
+		return btagFormat(sum[:], 8, 2, 6)
+	default:
 		return ReaderTag(reader)
 	}
-	sum := digestID([]byte("pcscid/reader/v2|"),
-		[]byte(normalizeReaderName(reader)), []byte("|"), []byte(serial))
-	return btagFormat(sum[:], 8, 2, 6)
 }
 
 // normalizeReaderName strips the trailing pcscd hotplug index groups
@@ -206,25 +241,29 @@ func isHotplugIndex(s string) bool {
 //
 // The channel is closed once ctx is cancelled.
 func Watch(ctx context.Context, opts *Options) (<-chan Event, error) {
-	lg, socketPath := watchOptions(opts)
+	lg, socketPath, sysfsRoot := watchOptions(opts)
 	cl, err := pcsc.New(socketPath, lg)
 	if err != nil {
 		return nil, fmt.Errorf("pcscid: pcscd unavailable: %w", err)
 	}
 	ch := make(chan Event, 8)
-	go watchLoop(ctx, cl, socketPath, lg, ch)
+	go watchLoop(ctx, cl, socketPath, sysfsRoot, lg, ch)
 	return ch, nil
 }
 
-func watchOptions(opts *Options) (lg *slog.Logger, socketPath string) {
+func watchOptions(opts *Options) (lg *slog.Logger, socketPath, sysfsRoot string) {
 	lg = slog.New(slog.DiscardHandler)
+	sysfsRoot = defaultSysfsUSB
 	if opts != nil {
 		if opts.Logger != nil {
 			lg = opts.Logger
 		}
 		socketPath = opts.SocketPath
+		if opts.SysfsUSBRoot != "" {
+			sysfsRoot = opts.SysfsUSBRoot
+		}
 	}
-	return lg, socketPath
+	return lg, socketPath, sysfsRoot
 }
 
 // reconnectDelay is the pause between two pcscd reconnection
@@ -238,14 +277,14 @@ const waitTick = time.Second
 
 // watchLoop keeps a client alive across pcscd restarts and drives
 // the state change handling.
-func watchLoop(ctx context.Context, cl *pcsc.Client, socketPath string, lg *slog.Logger, ch chan<- Event) {
+func watchLoop(ctx context.Context, cl *pcsc.Client, socketPath, sysfsRoot string, lg *slog.Logger, ch chan<- Event) {
 	defer close(ch)
 	tracking := newTracking()
 	for {
 		// Closing the connection is the cancellation path of a
 		// blocked WaitChange.
 		stopClose := context.AfterFunc(ctx, func() { cl.Close() })
-		err := pollLoop(ctx, cl, tracking, lg, ch)
+		err := pollLoop(ctx, cl, tracking, sysfsRoot, lg, ch)
 		stopClose()
 		cl.Close()
 		if ctx.Err() != nil {
@@ -285,7 +324,7 @@ func newTracking() *readerTracking {
 
 // pollLoop processes reader state changes until the transport breaks
 // or ctx is cancelled.
-func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, lg *slog.Logger, ch chan<- Event) error {
+func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, sysfsRoot string, lg *slog.Logger, ch chan<- Event) error {
 	// The event counters of a fresh connection mean nothing yet: a
 	// restarted daemon counts from zero again, so a still present
 	// card must not be re-reported just because its counter moved.
@@ -308,12 +347,12 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, lg
 			if present {
 				prev, known := tracking.counters[st.Reader]
 				if !wasPresent || (known && prev != st.EventCounter) {
-					// The serial attribute needs an open card connection,
-					// so the individual reader identity is only readable
-					// now, while the card is there.
-					serial := probeSerial(cl, lg, st.Reader)
-					card := identify(cl, lg, st, serial)
-					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderSerial: serial}) {
+					// The unit attributes need an open card
+					// connection, so the individual reader identity is
+					// only readable now, while the card is there.
+					serial, port := probeReaderUnit(cl, lg, st.Reader, sysfsRoot)
+					card := identify(cl, lg, st, serial, port)
+					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderSerial: serial, ReaderPort: port}) {
 						return nil
 					}
 				}
@@ -365,7 +404,7 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, lg
 }
 
 // identify builds the Card for a present reader state.
-func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial string) *Card {
+func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial, port string) *Card {
 	cardType := DetectType(st.ATR)
 	card := &Card{Type: cardType, ATR: st.ATR, Reader: st.Reader}
 	uid, protocol := probeUID(cl, lg, st.Reader)
@@ -380,7 +419,7 @@ func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial stri
 	lg.Debug("card inserted",
 		"reader", st.Reader,
 		"id", card.ID,
-		"reader-tag", ReaderTagWithSerial(st.Reader, serial),
+		"reader-tag", ReaderTagWithUnit(st.Reader, serial, port),
 		"reader-serial", serial,
 		"type", cardType,
 		"source", card.Source,

@@ -109,7 +109,7 @@ func run() error {
 		if ev.Kind != pcscid.KindInsert {
 			continue
 		}
-		line := "#" + pcscid.ReaderTagWithSerial(ev.Reader, ev.ReaderSerial) + ":" + ev.Card.ID
+		line := "#" + pcscid.ReaderTagWithUnit(ev.Reader, ev.ReaderSerial, ev.ReaderPort) + ":" + ev.Card.ID
 		if signer != nil {
 			line = signer.SignLine(line)
 		}

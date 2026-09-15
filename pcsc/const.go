@@ -28,6 +28,12 @@ const (
 	// connection, so it is readable only while a card is presented.
 	AttrVendorIFDSerialNo uint32 = 0x0103
 
+	// AttrChannelID is SCARD_ATTR_CHANNEL_ID. The CCID driver answers
+	// with the USB bus number and device address of the reader, packed
+	// as 0x0020<<16 | bus<<8 | device, which locates the device in
+	// sysfs and through it the physical USB port it sits on.
+	AttrChannelID uint32 = 0x0110
+
 	// Reader state bits as filled by the daemon in the reader state.
 	ReaderAbsent    uint32 = 0x0002
 	ReaderPresent   uint32 = 0x0004

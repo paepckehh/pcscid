@@ -3,6 +3,7 @@
 package pcsc
 
 import (
+	"encoding/binary"
 	"errors"
 	"log/slog"
 	"slices"
@@ -170,6 +171,32 @@ func TestClientGetAttribInvalidHandle(t *testing.T) {
 	}
 	if _, err := card.GetAttrib(AttrVendorIFDSerialNo); !errors.Is(err, Error(errInvalidHandle)) {
 		t.Errorf("get attrib after disconnect = %v, want SCARD_E_INVALID_HANDLE", err)
+	}
+}
+
+// The channel id attribute answers the USB bus/device packing of the
+// CCID driver, the second per-unit fact the reader identification
+// relies on.
+func TestClientGetAttribChannelID(t *testing.T) {
+	t.Parallel()
+	cl, fake := newTestClient(t)
+	fake.InsertCard("R", []byte{0x3B, 0x00}, []byte{0x04})
+	fake.SetChannelID("R", 0x00200122) // USB, bus 1, device 0x22
+	card, err := cl.Connect("R", ProtocolAny)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer card.Disconnect(LeaveCard)
+	attr, err := card.GetAttrib(AttrChannelID)
+	if err != nil {
+		t.Fatalf("get attrib: %v", err)
+	}
+	if len(attr) != 4 {
+		t.Fatalf("channel id = % X, want 4 bytes", attr)
+	}
+	id := binary.LittleEndian.Uint32(attr)
+	if id != 0x00200122 {
+		t.Errorf("channel id = 0x%08X, want 0x00200122", id)
 	}
 }
 

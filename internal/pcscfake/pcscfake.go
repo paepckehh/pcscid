@@ -44,6 +44,7 @@ const (
 	errServiceStopped     uint32 = 0x8010001E
 
 	attrVendorIFDSerialNo uint32 = 0x0103
+	attrChannelID         uint32 = 0x0110
 
 	maxATRSize = 33
 	maxReaders = 16
@@ -106,6 +107,7 @@ type Reader struct {
 	ATR          []byte
 	UID          []byte // response to FF CA 00 00 00, nil means unsupported
 	Serial       string // SCARD_ATTR_VENDOR_IFD_SERIAL_NO answer, empty means unsupported
+	ChannelID    uint32 // SCARD_ATTR_CHANNEL_ID answer, 0x0020BBAA, 0 means unsupported
 	Present      bool
 	EventCounter uint32
 }
@@ -175,6 +177,19 @@ func (s *Server) SetSerial(reader, serial string) {
 		r.Serial = serial
 	} else {
 		s.readers[reader] = &Reader{Serial: serial}
+	}
+	s.mu.Unlock()
+}
+
+// SetChannelID configures the SCARD_ATTR_CHANNEL_ID answer of the
+// reader, creating it if needed. The value mirrors the CCID driver
+// packing 0x0020<<16 | bus<<8 | device; zero disables the attribute.
+func (s *Server) SetChannelID(reader string, id uint32) {
+	s.mu.Lock()
+	if r, ok := s.readers[reader]; ok {
+		r.ChannelID = id
+	} else {
+		s.readers[reader] = &Reader{ChannelID: id}
 	}
 	s.mu.Unlock()
 }
@@ -524,12 +539,16 @@ func (s *Server) getAttrib(conn net.Conn, body []byte) error {
 	cardHandle := binary.LittleEndian.Uint32(body[0:4])
 	attrID := binary.LittleEndian.Uint32(body[4:8])
 	s.mu.Lock()
-	var serial []byte
+	var value []byte
 	known := false
 	if c, ok := s.cards[cardHandle]; ok {
 		known = true
-		if attrID == attrVendorIFDSerialNo && c.reader.Serial != "" {
-			serial = []byte(c.reader.Serial)
+		switch {
+		case attrID == attrVendorIFDSerialNo && c.reader.Serial != "":
+			value = []byte(c.reader.Serial)
+		case attrID == attrChannelID && c.reader.ChannelID != 0:
+			value = make([]byte, 4)
+			binary.LittleEndian.PutUint32(value, c.reader.ChannelID)
 		}
 	}
 	s.mu.Unlock()
@@ -537,14 +556,14 @@ func (s *Server) getAttrib(conn net.Conn, body []byte) error {
 	switch {
 	case !known:
 		rv = errInvalidHandle
-	case serial == nil:
+	case value == nil:
 		rv = errUnsupportedFeature
 	}
 	resp := make([]byte, 8+maxAttrSz+8)
 	binary.LittleEndian.PutUint32(resp[0:], cardHandle)
 	binary.LittleEndian.PutUint32(resp[4:], attrID)
-	copy(resp[8:], serial)
-	binary.LittleEndian.PutUint32(resp[8+maxAttrSz:], uint32(len(serial)))
+	copy(resp[8:], value)
+	binary.LittleEndian.PutUint32(resp[8+maxAttrSz:], uint32(len(value)))
 	binary.LittleEndian.PutUint32(resp[8+maxAttrSz+4:], rv)
 	_, err := conn.Write(resp)
 	return err

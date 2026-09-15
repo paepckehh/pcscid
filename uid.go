@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"paepcke.de/pcscid/pcsc"
 )
@@ -82,40 +81,6 @@ func probeUID(cl *pcsc.Client, lg *slog.Logger, reader string) (uid []byte, prot
 		"uid", fmt.Sprintf("% X", uid),
 		"protocol", protocolName(card.Protocol()))
 	return uid, card.Protocol()
-}
-
-// probeSerial asks the reader driver for the serial number of the
-// reader hardware, SCARD_ATTR_VENDOR_IFD_SERIAL_NO. The CCID driver
-// answers with the USB iSerial string of the device, which identifies
-// the individual unit of a reader model, not only the model. The
-// attribute needs an open card connection, so it is readable only
-// while a card is presented; drivers and readers without a serial
-// answer an error, which maps to the empty string.
-func probeSerial(cl *pcsc.Client, lg *slog.Logger, reader string) string {
-	card, err := openCard(cl, reader)
-	if err != nil {
-		lg.Debug("serial probe connect failed",
-			"reader", reader, "error", err)
-		return ""
-	}
-	defer func() {
-		if err := card.Disconnect(pcsc.LeaveCard); err != nil {
-			lg.Debug("serial probe disconnect failed", "reader", reader, "error", err)
-		}
-	}()
-	attr, err := card.GetAttrib(pcsc.AttrVendorIFDSerialNo)
-	if err != nil {
-		lg.Debug("reader serial unavailable",
-			"reader", reader, "error", err)
-		return ""
-	}
-	serial := strings.TrimSpace(strings.Trim(string(attr), "\x00"))
-	if serial == "" {
-		lg.Debug("reader serial empty", "reader", reader)
-		return ""
-	}
-	lg.Debug("reader serial read", "reader", reader, "serial", serial)
-	return serial
 }
 
 func protocolName(p uint32) string {

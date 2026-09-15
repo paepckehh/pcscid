@@ -74,21 +74,33 @@ index groups stripped (`normalizeReaderName`), so the same physical
 reader keeps its tag across machines, USB ports and daemon
 restarts. The reader state array carries no hardware serial, so two
 units of the same model share that name based tag. The individual
-unit is identified by its vendor serial instead: while a card is
-present, the watch loop connects and asks
-`SCardGetAttrib(SCARD_ATTR_VENDOR_IFD_SERIAL_NO)` over the same
-pcscd wire protocol (`cmdGetAttrib 0x0F`, the 280 byte `getset`
-struct); the CCID driver answers with the USB iSerial string burned
-into the reader hardware. `ReaderTagWithSerial(name, serial)` mixes
-that serial into the tag (hash domain `pcscid/reader/v2`, the empty
-serial falls back to the plain name tag), so two units of the same
-model get distinct tags that still survive machines, ports and
-restarts. The serial travels in `Event.ReaderSerial`, only insertions
-carry it (the attribute needs the card connection); readers whose
-driver or device serves no serial keep the model level tag, nothing
-can distinguish those by software. `lsusb` shows the same iSerial
-(`iSerial` in `lsusb -v`), it is the same USB descriptor the driver
-reads, no extra layer is needed.
+unit is identified through the same pcscd wire protocol, with two
+per-unit facts probed over `SCardGetAttrib` while a card is present
+(`cmdGetAttrib 0x0F`, the 280 byte `getset` struct):
+`SCARD_ATTR_VENDOR_IFD_SERIAL_NO` (0x0103) answers the USB iSerial
+string burned into the reader hardware (`lsusb -v` shows the same
+descriptor), `ReaderTagWithSerial` mixes it into the tag (hash
+domain `pcscid/reader/v2`), one portable tag per unit. Constant
+vendor placeholders are filtered first: reader families whose USB
+descriptor serves the same all zero serial on every unit (ACS
+ACR122U serves `0`) keep the model level tag from that path, the
+ACR122U iSerial is fixed in its controller firmware and no public
+tool writes it, the ACR122U escape command set has no NVRAM store
+(the only persistent field is the 1 byte PICC operating parameter,
+too small and RF-behavior-changing to serve as an ID). Such serial
+less readers are anchored by their physical USB port instead:
+`SCARD_ATTR_CHANNEL_ID` (0x0110) answers the CCID packing
+`0x0020<<16 | bus<<8 | device`, resolved through sysfs
+(`/sys/bus/usb/devices`, busnum/devnum/devnum files, pure Go) to
+the kernel port path (devpath, `2-1.3`), which `ReaderTagWithUnit`
+mixes in as hash domain `pcscid/reader/v3` — stable per port across
+daemon restarts and reboots, but it changes when the reader moves
+to another port, so it is only the fallback when no usable serial
+exists. Precedence: serial, port path, model tag. The facts travel
+in `Event.ReaderSerial` and `Event.ReaderPort`, only insertions
+carry them (the attributes need the card connection); readers whose
+driver serves neither keep the model level tag, nothing can
+distinguish those by software.
 
 ## Bridge mode (loopback HTTP, env var config)
 
@@ -96,7 +108,7 @@ A browser sandbox cannot reach the pcscd socket (no Unix sockets from
 WASM/JS, no WebUSB/WebHID in Firefox, no raw sockets in WebExtensions),
 so `bridge.go` provides the minimal local footprint for kiosk pages:
 `pcscid.Bridge` feeds Watch insertions through the tag derivation
-(ReaderTagWithSerial + Btag) and a dedup guard and serves them as SSE + polling
+(ReaderTagWithUnit + Btag) and a dedup guard and serves them as SSE + polling
 JSON with permissive CORS (loopback is a potentially trustworthy
 origin, so the loopback http is not mixed content for an HTTPS page).
 

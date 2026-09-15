@@ -108,14 +108,14 @@ func NewBridge(opts *BridgeOptions) *Bridge {
 // Feed applies one Watch event. Insertions with an identified card become
 // one bridge presentation, {reader tag, card btag}, filtered by the dedup
 // guard; removals and card-less events are ignored — one presentation per
-// scan. The reader tag carries the reader serial when the event provides
-// one, so two units of the same reader model serve distinct tags. Feed
-// never blocks.
+// scan. The reader tag carries the reader serial, or its USB port path
+// when no usable serial exists, so two units of the same reader model
+// serve distinct tags. Feed never blocks.
 func (b *Bridge) Feed(ev Event) {
 	if ev.Kind != KindInsert || ev.Card == nil {
 		return
 	}
-	reader, card := ReaderTagWithSerial(ev.Reader, ev.ReaderSerial), ev.Card.ID
+	reader, card := ReaderTagWithUnit(ev.Reader, ev.ReaderSerial, ev.ReaderPort), ev.Card.ID
 	if b.dd.allow(reader, card) {
 		b.hub.add(reader, card)
 	}
