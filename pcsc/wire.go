@@ -26,6 +26,7 @@ const (
 	cmdConnect               uint32 = 0x04
 	cmdDisconnect            uint32 = 0x06
 	cmdTransmit              uint32 = 0x09
+	cmdGetAttrib             uint32 = 0x0F
 	cmdVersion               uint32 = 0x11
 	cmdGetReadersState       uint32 = 0x12
 	cmdWaitReaderStateChange uint32 = 0x13
@@ -40,6 +41,7 @@ const (
 	maxReaderName     = 128
 	maxReaders        = 16  // PCSCLITE_MAX_READERS_CONTEXTS
 	readerStateWireSz = 184 // sizeof(READER_STATE) on little endian hosts
+	maxAttrSize       = 264 // MAX_BUFFER_SIZE, the get/set attrib buffer
 )
 
 // writeMessage writes a [size][command][body] framed message.
@@ -227,6 +229,47 @@ func decodeTransmit(b []byte) transmitMsg {
 		recvLength:   binary.LittleEndian.Uint32(b[24:28]),
 		rv:           binary.LittleEndian.Uint32(b[28:32]),
 	}
+}
+
+// getsetMsg is struct getset_struct, the shared body of the
+// SCARD_GET_ATTRIB and SCARD_SET_ATTRIB exchanges: 280 bytes on the
+// wire, both directions, no variable length tail.
+//
+//	int32 hCard; uint32 dwAttrId; uint8 pbAttr[MAX_BUFFER_SIZE];
+//	uint32 cbAttrLen; uint32 rv;
+type getsetMsg struct {
+	card    uint32
+	attrID  uint32
+	attr    []byte
+	attrLen uint32
+	rv      uint32
+}
+
+func encodeGetset(g getsetMsg) []byte {
+	buf := make([]byte, 8+maxAttrSize+8)
+	binary.LittleEndian.PutUint32(buf[0:], g.card)
+	binary.LittleEndian.PutUint32(buf[4:], g.attrID)
+	copy(buf[8:], g.attr)
+	binary.LittleEndian.PutUint32(buf[8+maxAttrSize:], g.attrLen)
+	binary.LittleEndian.PutUint32(buf[8+maxAttrSize+4:], g.rv)
+	return buf
+}
+
+func decodeGetset(b []byte) getsetMsg {
+	msg := getsetMsg{
+		card:    binary.LittleEndian.Uint32(b[0:4]),
+		attrID:  binary.LittleEndian.Uint32(b[4:8]),
+		attrLen: binary.LittleEndian.Uint32(b[8+maxAttrSize : 8+maxAttrSize+4]),
+		rv:      binary.LittleEndian.Uint32(b[8+maxAttrSize+4:]),
+	}
+	// The daemon must never claim more than the fixed buffer, a
+	// larger length would be a protocol violation and must not leak
+	// into a slice bound.
+	if msg.attrLen > maxAttrSize {
+		msg.attrLen = 0
+	}
+	msg.attr = append([]byte(nil), b[8:8+msg.attrLen]...)
+	return msg
 }
 
 // waitMsg is struct wait_reader_state_change: 8 bytes.

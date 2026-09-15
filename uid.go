@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"paepcke.de/pcscid/pcsc"
 )
@@ -23,15 +24,23 @@ func isRandomUID(uid []byte) bool {
 	return len(uid) == 4 && uid[0] == 0x08
 }
 
-// probeUID connects to the card in reader and asks for its UID. It
-// returns nil when neither the card nor the reader can provide one,
-// the caller then falls back to ATR based, type level identification.
-func probeUID(cl *pcsc.Client, lg *slog.Logger, reader string) (uid []byte, protocol uint32) {
+// openCard connects to the card currently in reader, with the raw
+// protocol fallback some memory tags need. Readers without a present
+// card fail, like a raw Connect.
+func openCard(cl *pcsc.Client, reader string) (*pcsc.Card, error) {
 	card, err := cl.Connect(reader, pcsc.ProtocolAny)
 	if errors.Is(err, pcsc.ErrProtoMismatch) {
 		// Raw cards, for example some memory tags, negotiate nothing.
 		card, err = cl.Connect(reader, pcsc.ProtocolRaw)
 	}
+	return card, err
+}
+
+// probeUID connects to the card in reader and asks for its UID. It
+// returns nil when neither the card nor the reader can provide one,
+// the caller then falls back to ATR based, type level identification.
+func probeUID(cl *pcsc.Client, lg *slog.Logger, reader string) (uid []byte, protocol uint32) {
+	card, err := openCard(cl, reader)
 	if err != nil {
 		lg.Debug("connect failed, falling back to atr identity",
 			"reader", reader, "error", err)
@@ -73,6 +82,40 @@ func probeUID(cl *pcsc.Client, lg *slog.Logger, reader string) (uid []byte, prot
 		"uid", fmt.Sprintf("% X", uid),
 		"protocol", protocolName(card.Protocol()))
 	return uid, card.Protocol()
+}
+
+// probeSerial asks the reader driver for the serial number of the
+// reader hardware, SCARD_ATTR_VENDOR_IFD_SERIAL_NO. The CCID driver
+// answers with the USB iSerial string of the device, which identifies
+// the individual unit of a reader model, not only the model. The
+// attribute needs an open card connection, so it is readable only
+// while a card is presented; drivers and readers without a serial
+// answer an error, which maps to the empty string.
+func probeSerial(cl *pcsc.Client, lg *slog.Logger, reader string) string {
+	card, err := openCard(cl, reader)
+	if err != nil {
+		lg.Debug("serial probe connect failed",
+			"reader", reader, "error", err)
+		return ""
+	}
+	defer func() {
+		if err := card.Disconnect(pcsc.LeaveCard); err != nil {
+			lg.Debug("serial probe disconnect failed", "reader", reader, "error", err)
+		}
+	}()
+	attr, err := card.GetAttrib(pcsc.AttrVendorIFDSerialNo)
+	if err != nil {
+		lg.Debug("reader serial unavailable",
+			"reader", reader, "error", err)
+		return ""
+	}
+	serial := strings.TrimSpace(strings.Trim(string(attr), "\x00"))
+	if serial == "" {
+		lg.Debug("reader serial empty", "reader", reader)
+		return ""
+	}
+	lg.Debug("reader serial read", "reader", reader, "serial", serial)
+	return serial
 }
 
 func protocolName(p uint32) string {

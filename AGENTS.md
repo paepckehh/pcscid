@@ -72,8 +72,23 @@ btag on every machine, every pcscd socket and every reader.
 hashes the pcscd reader name with its volatile trailing hotplug
 index groups stripped (`normalizeReaderName`), so the same physical
 reader keeps its tag across machines, USB ports and daemon
-restarts; the daemon protocol carries no hardware serial, so two
-units of the same model share one tag.
+restarts. The reader state array carries no hardware serial, so two
+units of the same model share that name based tag. The individual
+unit is identified by its vendor serial instead: while a card is
+present, the watch loop connects and asks
+`SCardGetAttrib(SCARD_ATTR_VENDOR_IFD_SERIAL_NO)` over the same
+pcscd wire protocol (`cmdGetAttrib 0x0F`, the 280 byte `getset`
+struct); the CCID driver answers with the USB iSerial string burned
+into the reader hardware. `ReaderTagWithSerial(name, serial)` mixes
+that serial into the tag (hash domain `pcscid/reader/v2`, the empty
+serial falls back to the plain name tag), so two units of the same
+model get distinct tags that still survive machines, ports and
+restarts. The serial travels in `Event.ReaderSerial`, only insertions
+carry it (the attribute needs the card connection); readers whose
+driver or device serves no serial keep the model level tag, nothing
+can distinguish those by software. `lsusb` shows the same iSerial
+(`iSerial` in `lsusb -v`), it is the same USB descriptor the driver
+reads, no extra layer is needed.
 
 ## Bridge mode (loopback HTTP, env var config)
 
@@ -81,7 +96,7 @@ A browser sandbox cannot reach the pcscd socket (no Unix sockets from
 WASM/JS, no WebUSB/WebHID in Firefox, no raw sockets in WebExtensions),
 so `bridge.go` provides the minimal local footprint for kiosk pages:
 `pcscid.Bridge` feeds Watch insertions through the tag derivation
-(ReaderTag + Btag) and a dedup guard and serves them as SSE + polling
+(ReaderTagWithSerial + Btag) and a dedup guard and serves them as SSE + polling
 JSON with permissive CORS (loopback is a potentially trustworthy
 origin, so the loopback http is not mixed content for an HTTPS page).
 

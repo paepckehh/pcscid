@@ -115,6 +115,50 @@ func TestTransmitCodecOffsets(t *testing.T) {
 	}
 }
 
+func TestGetsetCodecOffsets(t *testing.T) {
+	t.Parallel()
+	msg := getsetMsg{
+		card:    9,
+		attrID:  AttrVendorIFDSerialNo,
+		attr:    []byte("A123456789"),
+		attrLen: 10,
+	}
+	encoded := encodeGetset(msg)
+	if len(encoded) != 280 {
+		t.Fatalf("encoded size = %d, want 280", len(encoded))
+	}
+	if got := binary.LittleEndian.Uint32(encoded[0:4]); got != 9 {
+		t.Errorf("card = %d, want 9", got)
+	}
+	if got := binary.LittleEndian.Uint32(encoded[4:8]); got != AttrVendorIFDSerialNo {
+		t.Errorf("attrID = 0x%08X, want 0x%08X", got, AttrVendorIFDSerialNo)
+	}
+	if got := encoded[8:18]; !bytes.Equal(got, []byte("A123456789")) {
+		t.Errorf("attr = %q, want the serial", got)
+	}
+	if got := binary.LittleEndian.Uint32(encoded[272:276]); got != 10 {
+		t.Errorf("attrLen = %d, want 10", got)
+	}
+	decoded := decodeGetset(encoded)
+	if decoded.card != 9 || decoded.attrID != AttrVendorIFDSerialNo || decoded.attrLen != 10 {
+		t.Errorf("decodeGetset = %+v", decoded)
+	}
+	if !bytes.Equal(decoded.attr, []byte("A123456789")) {
+		t.Errorf("decoded attr = %q, want the serial", decoded.attr)
+	}
+}
+
+// A daemon claiming more than the fixed attribute buffer must not leak
+// into a slice bound, the length is clamped to empty.
+func TestDecodeGetsetClampsOversizedLength(t *testing.T) {
+	t.Parallel()
+	encoded := encodeGetset(getsetMsg{card: 1, attrID: 2})
+	binary.LittleEndian.PutUint32(encoded[272:276], 999)
+	if got := decodeGetset(encoded); len(got.attr) != 0 {
+		t.Errorf("attr = % X, want empty for a clamped length", got.attr)
+	}
+}
+
 func TestSmallCodecRoundtrips(t *testing.T) {
 	t.Parallel()
 	if got := decodeEstablish(encodeEstablish(establishMsg{scope: ScopeUser, context: 3})); got.context != 3 {

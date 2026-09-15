@@ -116,6 +116,63 @@ func TestClientStatesWithCard(t *testing.T) {
 	}
 }
 
+func TestClientGetAttribSerial(t *testing.T) {
+	t.Parallel()
+	cl, fake := newTestClient(t)
+	fake.InsertCard("R", []byte{0x3B, 0x00}, []byte{0x04})
+	fake.SetSerial("R", "A123456789")
+	card, err := cl.Connect("R", ProtocolAny)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer card.Disconnect(LeaveCard)
+	attr, err := card.GetAttrib(AttrVendorIFDSerialNo)
+	if err != nil {
+		t.Fatalf("get attrib: %v", err)
+	}
+	if string(attr) != "A123456789" {
+		t.Errorf("serial = %q, want A123456789", attr)
+	}
+	// Another attribute id is not served by the driver, the exchange
+	// must surface the error instead of inventing data.
+	if _, err := card.GetAttrib(0xDEADBEEF); err == nil {
+		t.Error("unsupported attribute must fail")
+	}
+}
+
+func TestClientGetAttribNoSerial(t *testing.T) {
+	t.Parallel()
+	cl, fake := newTestClient(t)
+	fake.InsertCard("R", []byte{0x3B, 0x00}, []byte{0x04})
+	card, err := cl.Connect("R", ProtocolAny)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer card.Disconnect(LeaveCard)
+	if _, err := card.GetAttrib(AttrVendorIFDSerialNo); err == nil {
+		t.Error("a reader without a serial must fail the attribute read")
+	}
+}
+
+// The attribute read is tied to the card handle like the transmit: a
+// disconnected card must be rejected by the daemon.
+func TestClientGetAttribInvalidHandle(t *testing.T) {
+	t.Parallel()
+	cl, fake := newTestClient(t)
+	fake.InsertCard("R", []byte{0x3B, 0x00}, []byte{0x04})
+	fake.SetSerial("R", "S1")
+	card, err := cl.Connect("R", ProtocolAny)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := card.Disconnect(LeaveCard); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	if _, err := card.GetAttrib(AttrVendorIFDSerialNo); !errors.Is(err, Error(errInvalidHandle)) {
+		t.Errorf("get attrib after disconnect = %v, want SCARD_E_INVALID_HANDLE", err)
+	}
+}
+
 func TestClientWaitChangeWakesOnInsert(t *testing.T) {
 	t.Parallel()
 	cl, fake := newTestClient(t)

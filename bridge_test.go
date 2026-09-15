@@ -98,6 +98,30 @@ func TestBridgeFeedDerivesTags(t *testing.T) {
 	}
 }
 
+// TestBridgeFeedSerialDistinctReaders pins the serial aware reader tag
+// on the bridge surface: two units of the same model, same name based
+// tag, serve distinct reader tags once their driver serials are known.
+func TestBridgeFeedSerialDistinctReaders(t *testing.T) {
+	t.Parallel()
+	b := NewBridge(&BridgeOptions{Capacity: 8, StartupGrace: time.Nanosecond})
+	time.Sleep(time.Millisecond)
+	b.Feed(Event{Kind: KindInsert, Reader: "ACS ACR122U 01 00 00", ReaderSerial: "A001", Card: &Card{ID: "card000001"}})
+	b.Feed(Event{Kind: KindInsert, Reader: "ACS ACR122U 02 00 00", ReaderSerial: "B002", Card: &Card{ID: "card000002"}})
+	got := b.hub.since(0)
+	if len(got) != 2 {
+		t.Fatalf("two events expected, got %+v", got)
+	}
+	if got[0].Reader == got[1].Reader {
+		t.Fatalf("two identical readers with serials must serve distinct tags, got %q twice", got[0].Reader)
+	}
+	if got[0].Reader != ReaderTagWithSerial("ACS ACR122U 01 00 00", "A001") {
+		t.Errorf("first tag = %q, want the serial derived tag", got[0].Reader)
+	}
+	if got[1].Reader != ReaderTagWithSerial("ACS ACR122U 02 00 00", "B002") {
+		t.Errorf("second tag = %q, want the serial derived tag", got[1].Reader)
+	}
+}
+
 // TestBridgeHealthAndPending exercises the polling surface of the
 // Handler: /health answers the liveness probe, /pending replays events
 // by cursor, both with permissive CORS headers for HTTPS kiosk pages.

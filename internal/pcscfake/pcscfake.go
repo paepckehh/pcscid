@@ -28,6 +28,7 @@ const (
 	cmdConnect                      uint32 = 0x04
 	cmdDisconnect                   uint32 = 0x06
 	cmdTransmit                     uint32 = 0x09
+	cmdGetAttrib                    uint32 = 0x0F
 	cmdVersion                      uint32 = 0x11
 	cmdGetReadersState              uint32 = 0x12
 	cmdWaitReaderStateChange        uint32 = 0x13
@@ -36,13 +37,17 @@ const (
 
 // SCARD error codes and limits, mirroring pcsc-lite src/pcsclite.h.
 const (
-	errInvalidHandle  uint32 = 0x80100003
-	errUnknownReader  uint32 = 0x80100009
-	errNoSmartcard    uint32 = 0x8010000C
-	errServiceStopped uint32 = 0x8010001E
+	errInvalidHandle      uint32 = 0x80100003
+	errUnknownReader      uint32 = 0x80100009
+	errNoSmartcard        uint32 = 0x8010000C
+	errUnsupportedFeature uint32 = 0x80100022
+	errServiceStopped     uint32 = 0x8010001E
+
+	attrVendorIFDSerialNo uint32 = 0x0103
 
 	maxATRSize = 33
 	maxReaders = 16
+	maxAttrSz  = 264
 
 	stateAbsent      uint32 = 0x0002
 	statePresent     uint32 = 0x0004
@@ -100,6 +105,7 @@ type Server struct {
 type Reader struct {
 	ATR          []byte
 	UID          []byte // response to FF CA 00 00 00, nil means unsupported
+	Serial       string // SCARD_ATTR_VENDOR_IFD_SERIAL_NO answer, empty means unsupported
 	Present      bool
 	EventCounter uint32
 }
@@ -157,6 +163,20 @@ func (s *Server) InsertCard(reader string, atr []byte, uid []byte) {
 	r.EventCounter++
 	s.mu.Unlock()
 	s.wakeWaiters()
+}
+
+// SetSerial configures the SCARD_ATTR_VENDOR_IFD_SERIAL_NO answer of
+// the reader, creating it if needed. An empty serial makes the reader
+// answer the unsupported feature error, like a device without a USB
+// serial number.
+func (s *Server) SetSerial(reader, serial string) {
+	s.mu.Lock()
+	if r, ok := s.readers[reader]; ok {
+		r.Serial = serial
+	} else {
+		s.readers[reader] = &Reader{Serial: serial}
+	}
+	s.mu.Unlock()
 }
 
 // RemoveCard removes the card from the reader.
@@ -337,6 +357,12 @@ func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool
 		}
 		return false, s.transmit(conn, body)
 
+	case cmdGetAttrib:
+		if len(body) != 8+maxAttrSz+8 {
+			return true, fmt.Errorf("pcscfake: get attrib body %d bytes, want %d", len(body), 8+maxAttrSz+8)
+		}
+		return false, s.getAttrib(conn, body)
+
 	case cmdDisconnect:
 		if len(body) != 12 {
 			return true, fmt.Errorf("pcscfake: disconnect body %d bytes, want 12", len(body))
@@ -484,6 +510,41 @@ func (s *Server) transmit(conn net.Conn, body []byte) error {
 		return err
 	}
 	return nil
+}
+
+// getAttrib answers a SCARD_GET_ATTRIB request with the raw 280 byte
+// getset struct, the value embedded in the fixed buffer like the real
+// daemon does. Only the vendor serial attribute is served, everything
+// else answers the unsupported feature error, like a driver without
+// that capability.
+func (s *Server) getAttrib(conn net.Conn, body []byte) error {
+	cardHandle := binary.LittleEndian.Uint32(body[0:4])
+	attrID := binary.LittleEndian.Uint32(body[4:8])
+	s.mu.Lock()
+	var serial []byte
+	known := false
+	if c, ok := s.cards[cardHandle]; ok {
+		known = true
+		if attrID == attrVendorIFDSerialNo && c.reader.Serial != "" {
+			serial = []byte(c.reader.Serial)
+		}
+	}
+	s.mu.Unlock()
+	var rv uint32
+	switch {
+	case !known:
+		rv = errInvalidHandle
+	case serial == nil:
+		rv = errUnsupportedFeature
+	}
+	resp := make([]byte, 8+maxAttrSz+8)
+	binary.LittleEndian.PutUint32(resp[0:], cardHandle)
+	binary.LittleEndian.PutUint32(resp[4:], attrID)
+	copy(resp[8:], serial)
+	binary.LittleEndian.PutUint32(resp[8+maxAttrSz:], uint32(len(serial)))
+	binary.LittleEndian.PutUint32(resp[8+maxAttrSz+4:], rv)
+	_, err := conn.Write(resp)
+	return err
 }
 
 type versionMsg struct {

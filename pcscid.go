@@ -72,6 +72,12 @@ type Event struct {
 	Card *Card
 	// Reader is the reader name the event belongs to.
 	Reader string
+	// ReaderSerial is the hardware serial number of the reader
+	// (SCARD_ATTR_VENDOR_IFD_SERIAL_NO, the USB iSerial string of the
+	// unit) when the driver serves it, empty otherwise. It is probed
+	// with the card connection of an insertion, so only insertions
+	// carry it. See ReaderTagWithSerial.
+	ReaderSerial string
 }
 
 // Options tunes Watch. A nil Options selects every default.
@@ -136,10 +142,27 @@ func Btag(cardType string, tag []byte) string {
 // "ACS ACR122U 01 00 00", where the trailing number groups change
 // with the USB port, the boot order and the machine. Those groups are
 // stripped before hashing, so the tag follows the reader hardware,
-// not its point of attachment. Two identical reader models share one
-// tag, there is no serial number in the daemon protocol.
+// not its point of attachment. Two identical reader models whose
+// names carry no serial number share one tag, ReaderTagWithSerial
+// fixes that with the serial from the driver when one is available.
 func ReaderTag(reader string) string {
 	sum := digestID([]byte("pcscid/reader/v1|"), []byte(normalizeReaderName(reader)))
+	return btagFormat(sum[:], 8, 2, 6)
+}
+
+// ReaderTagWithSerial derives the reader tag from the reader name and
+// the hardware serial number of the unit (Event.ReaderSerial, the USB
+// iSerial string from SCARD_ATTR_VENDOR_IFD_SERIAL_NO). Readers of the
+// same model, whose names hash to the same ReaderTag, get distinct
+// tags, one per physical unit, still stable across machines, sockets,
+// USB ports and daemon restarts: the serial is burned into the reader
+// hardware. An empty serial falls back to the plain name based tag.
+func ReaderTagWithSerial(reader, serial string) string {
+	if serial == "" {
+		return ReaderTag(reader)
+	}
+	sum := digestID([]byte("pcscid/reader/v2|"),
+		[]byte(normalizeReaderName(reader)), []byte("|"), []byte(serial))
 	return btagFormat(sum[:], 8, 2, 6)
 }
 
@@ -285,8 +308,12 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, lg
 			if present {
 				prev, known := tracking.counters[st.Reader]
 				if !wasPresent || (known && prev != st.EventCounter) {
-					card := identify(cl, lg, st)
-					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader}) {
+					// The serial attribute needs an open card connection,
+					// so the individual reader identity is only readable
+					// now, while the card is there.
+					serial := probeSerial(cl, lg, st.Reader)
+					card := identify(cl, lg, st, serial)
+					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderSerial: serial}) {
 						return nil
 					}
 				}
@@ -338,7 +365,7 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, lg
 }
 
 // identify builds the Card for a present reader state.
-func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState) *Card {
+func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial string) *Card {
 	cardType := DetectType(st.ATR)
 	card := &Card{Type: cardType, ATR: st.ATR, Reader: st.Reader}
 	uid, protocol := probeUID(cl, lg, st.Reader)
@@ -353,7 +380,8 @@ func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState) *Card {
 	lg.Debug("card inserted",
 		"reader", st.Reader,
 		"id", card.ID,
-		"reader-tag", ReaderTag(st.Reader),
+		"reader-tag", ReaderTagWithSerial(st.Reader, serial),
+		"reader-serial", serial,
 		"type", cardType,
 		"source", card.Source,
 		"uid", fmt.Sprintf("% X", uid),

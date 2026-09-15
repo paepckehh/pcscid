@@ -21,6 +21,13 @@ const (
 	LeaveCard uint32 = 0x0000
 	ResetCard uint32 = 0x0001
 
+	// AttrVendorIFDSerialNo is SCARD_ATTR_VENDOR_IFD_SERIAL_NO, the
+	// serial number of the reader hardware. The CCID driver answers
+	// with the USB iSerial string of the device, which identifies one
+	// physical unit of a reader model. It needs an open card
+	// connection, so it is readable only while a card is presented.
+	AttrVendorIFDSerialNo uint32 = 0x0103
+
 	// Reader state bits as filled by the daemon in the reader state.
 	ReaderAbsent    uint32 = 0x0002
 	ReaderPresent   uint32 = 0x0004

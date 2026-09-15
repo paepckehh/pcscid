@@ -397,6 +397,22 @@ func (c *ipcCard) transmit(apdu []byte, maxResp int) ([]byte, error) {
 	return data, nil
 }
 
+// getAttrib performs one SCardGetAttrib exchange on an open card
+// connection. The request and the response both carry the full 280
+// byte getset struct, the value travels inside its fixed buffer, the
+// effective length is the cbAttrLen field of the response.
+func (c *ipcCard) getAttrib(attr uint32) ([]byte, error) {
+	req := getsetMsg{card: c.handle, attrID: attr, attrLen: maxAttrSize}
+	if err := c.client.exchange(cmdGetAttrib, encodeGetset(req), 8+maxAttrSize+8); err != nil {
+		return nil, err
+	}
+	resp := decodeGetset(c.client.body)
+	if resp.rv != 0 {
+		return nil, Error(resp.rv)
+	}
+	return resp.attr, nil
+}
+
 func (c *ipcCard) disconnect(disposition uint32) error {
 	req := disconnectMsg{card: c.handle, disposition: disposition}
 	if err := c.client.exchange(cmdDisconnect, encodeDisconnect(req), 12); err != nil {

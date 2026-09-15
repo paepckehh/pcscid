@@ -202,6 +202,104 @@ func TestWatchReportsPresentCardAtStart(t *testing.T) {
 	}
 }
 
+// TestReaderTagWithSerial pins the serial based reader identity: two
+// units of the same model, whose names hash to the same model tag, get
+// distinct tags once the driver serves their serials, and the tags
+// stay stable across the volatile hotplug indices.
+func TestReaderTagWithSerial(t *testing.T) {
+	t.Parallel()
+	reader := "ACS ACR122U 01 00 00"
+	tag := ReaderTagWithSerial(reader, "A001")
+	if tag != ReaderTagWithSerial(reader, "A001") {
+		t.Error("ReaderTagWithSerial is not deterministic")
+	}
+	if ReaderTagWithSerial(reader, "A001") == ReaderTagWithSerial(reader, "B002") {
+		t.Error("two serials must produce different tags")
+	}
+	if ReaderTagWithSerial(reader, "A001") == ReaderTag(reader) {
+		t.Error("the serial must take part in the tag")
+	}
+	// The hotplug indices must stay stripped: the same unit keeps its
+	// tag across daemon restarts and USB ports.
+	for _, name := range []string{"ACS ACR122U 02 00 00", "ACS ACR122U 05 01 00"} {
+		if ReaderTagWithSerial(name, "A001") != ReaderTagWithSerial(reader, "A001") {
+			t.Errorf("ReaderTagWithSerial(%q) changed the tag of the same unit", name)
+		}
+	}
+	// The empty serial is the documented fallback to the plain tag.
+	if ReaderTagWithSerial(reader, "") != ReaderTag(reader) {
+		t.Error("empty serial must fall back to ReaderTag")
+	}
+	if !regexp.MustCompile(`^[0-9a-z]{2}-[0-9a-z]{4}-[0-9a-z]{2}$`).MatchString(ReaderTagWithSerial(reader, "A001")) {
+		t.Errorf("ReaderTagWithSerial = %q, want xx-xxxx-xx lowercase alphanumeric", ReaderTagWithSerial(reader, "A001"))
+	}
+}
+
+// TestWatchIdentifiesIdenticalReadersBySerial drives the whole watch
+// pipeline over two units of the same reader model: their names differ
+// only in the volatile hotplug indices, so the name based tag collides,
+// the driver served serials must separate them.
+func TestWatchIdentifiesIdenticalReadersBySerial(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, uid)
+	fake.SetSerial("ACS ACR122U 01 00 00", "A001")
+	uidB := []byte{0x04, 0xAA, 0xBB, 0xCC}
+	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, uidB)
+	fake.SetSerial("ACS ACR122U 02 00 00", "B002")
+
+	first := receiveEvent(t, events, 3*time.Second)
+	if first.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", first.Kind)
+	}
+	second := receiveEvent(t, events, 3*time.Second)
+	if second.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", second.Kind)
+	}
+	for _, ev := range []Event{first, second} {
+		if ev.ReaderSerial == "" {
+			t.Errorf("reader %q carries no serial, the probe must deliver it", ev.Reader)
+		}
+	}
+	if ReaderTag(first.Reader) != ReaderTag(second.Reader) {
+		t.Fatal("test setup: the two readers must collide on the name based tag")
+	}
+	if ReaderTagWithSerial(first.Reader, first.ReaderSerial) == ReaderTagWithSerial(second.Reader, second.ReaderSerial) {
+		t.Errorf("two identical readers with serials %q and %q share one tag",
+			first.ReaderSerial, second.ReaderSerial)
+	}
+	// The serial must not leak into the card identity: the same card
+	// keeps its btag on every reader.
+	if first.Card.ID != Btag("mifare classic 1k", uid) {
+		t.Errorf("card id = %q, want the uid derived btag", first.Card.ID)
+	}
+}
+
+// TestWatchWithoutSerialFallsBackToModelTag documents the limitation:
+// readers whose driver serves no serial (no USB serial number, or a
+// non CCID driver) keep the model level tag, the empty serial must not
+// disturb the event flow.
+func TestWatchWithoutSerialFallsBackToModelTag(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	fake.InsertCard("ACS ACR122U 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	ev := receiveEvent(t, events, 3*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.ReaderSerial != "" {
+		t.Errorf("reader serial = %q, want empty", ev.ReaderSerial)
+	}
+	if ReaderTagWithSerial(ev.Reader, ev.ReaderSerial) != ReaderTag(ev.Reader) {
+		t.Error("empty serial must fall back to the model tag")
+	}
+}
+
 func TestWatchInsertRemoveStableID(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)

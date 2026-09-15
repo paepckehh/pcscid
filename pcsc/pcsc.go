@@ -94,6 +94,14 @@ func (c *Card) Transmit(apdu []byte, maxResp int) ([]byte, error) {
 	return c.ipc.transmit(apdu, maxResp)
 }
 
+// GetAttrib asks the reader driver for the attribute identified by the
+// PC/SC attribute id, for example AttrVendorIFDSerialNo. It needs the
+// open card connection and fails when the driver cannot serve the
+// attribute, a reader without a hardware serial is such a case.
+func (c *Card) GetAttrib(attr uint32) ([]byte, error) {
+	return c.ipc.getAttrib(attr)
+}
+
 // Disconnect closes the card connection using the given disposition
 // (LeaveCard or ResetCard).
 func (c *Card) Disconnect(disposition uint32) error {
