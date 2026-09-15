@@ -221,7 +221,7 @@ $ make push    # pull, then push commits and tags
 
 The semver of `./pcscid -version` comes from `git describe --tags --abbrev=0` through
 `-ldflags "-X paepcke.de/pcscid.version=<tag>"`; without injection the binary falls back
-to the VCS revision recorded in the Go build info, and finally to `dev`.
+to the VCS revision recorded in the Go build info, and finally to the current release tag.
 
 ## Testing
 

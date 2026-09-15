@@ -389,10 +389,13 @@ func (s *Server) register(conn net.Conn) {
 // the daemon serializes both through its client list lock the same
 // way.
 func (s *Server) registerAndDump(conn net.Conn) error {
+	// The dump write itself must stay under the lock: releasing it
+	// before the write would let wakeWaiters put the change signal on
+	// the socket before the dump, desyncing the client stream.
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.waiters[conn] = struct{}{}
 	buf := s.encodeStatesLocked()
-	s.mu.Unlock()
 	_, err := conn.Write(buf)
 	return err
 }
