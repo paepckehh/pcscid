@@ -67,30 +67,48 @@ type BridgeOptions struct {
 	// NewBridge, default 2s. It must cover the initial "already
 	// present" reports of Watch.
 	StartupGrace time.Duration
+	// Signer, when set, signs every served presentation: each BridgeEvent
+	// carries the base64 SSHSIG signature of its exact output line
+	// "#<reader>:<card>" in Sig. The sample app wires the PCSCID_SIGN_KEY
+	// signer here so the bridge delivers the same signature the stdout
+	// lines carry — a kiosk page can then forward the event verbatim to a
+	// consumer that enforces signed punches. Without a signer the events
+	// stay unsigned (Sig omitted).
+	Signer *Signer
 }
 
 // BridgeEvent is one card presentation served over the bridge HTTP
 // surface. Reader is the reader tag (xx-xxxx-xx), Card the card btag
 // (xxx-xxx-xxxx). ID is the monotonic cursor the /pending polling
-// fallback replays with (after=last seen ID).
+// fallback replays with (after=last seen ID). Sig is the base64 SSHSIG
+// line signature of the exact output line "#<Reader>:<Card>" when the
+// bridge runs with a Signer (BridgeOptions.Signer, the PCSCID_SIGN_KEY
+// of the sample app): byte-identical to the signature the binary prints
+// after the '$' separator on stdout, so a consumer verifying the bridge
+// event (chrony's POST /terminal/punch, for example) verifies the same
+// bytes ssh-keygen -Y verify would check against the key's public half
+// under the namespace "pcscid". Without a Signer the field is omitted.
 type BridgeEvent struct {
 	ID     int64  `json:"id"`
 	Reader string `json:"reader"`
 	Card   string `json:"card"`
+	Sig    string `json:"sig,omitempty"`
 }
 
 // Bridge feeds Watch events through the tag derivation and the dedup
 // filter and serves the result as SSE and polling JSON over HTTP. The
 // zero value is not usable, use NewBridge.
 type Bridge struct {
-	hub *bridgeHub
-	dd  *bridgeDedup
+	hub    *bridgeHub
+	dd     *bridgeDedup
+	signer *Signer
 }
 
 // NewBridge returns a Bridge recording presentations with the given
 // options.
 func NewBridge(opts *BridgeOptions) *Bridge {
 	capacity, window, grace := bridgeCapacity, bridgeDedupWindow, bridgeStartupGrace
+	var signer *Signer
 	if opts != nil {
 		if opts.Capacity > 0 {
 			capacity = opts.Capacity
@@ -101,17 +119,18 @@ func NewBridge(opts *BridgeOptions) *Bridge {
 		if opts.StartupGrace > 0 {
 			grace = opts.StartupGrace
 		}
+		signer = opts.Signer
 	}
-	return &Bridge{hub: newBridgeHub(capacity), dd: newBridgeDedup(window, grace)}
+	return &Bridge{hub: newBridgeHub(capacity), dd: newBridgeDedup(window, grace), signer: signer}
 }
 
 // Feed applies one Watch event. Insertions with an identified card become
-// one bridge presentation, {reader tag, card btag}, filtered by the dedup
-// guard; removals and card-less events are ignored — one presentation per
-// scan. The reader tag is Event.ReaderTag as derived by Watch (unit facts
-// and machine identity per the Watch Options); events without one, for
-// example from a hand built event loop, fall back to the local derivation.
-// Feed never blocks.
+// one bridge presentation, {reader tag, card btag, line signature},
+// filtered by the dedup guard; removals and card-less events are ignored —
+// one presentation per scan. The reader tag is Event.ReaderTag as derived
+// by Watch (unit facts and machine identity per the Watch Options); events
+// without one, for example from a hand built event loop, fall back to the
+// local derivation. Feed never blocks.
 func (b *Bridge) Feed(ev Event) {
 	if ev.Kind != KindInsert || ev.Card == nil {
 		return
@@ -122,8 +141,20 @@ func (b *Bridge) Feed(ev Event) {
 	}
 	card := ev.Card.ID
 	if b.dd.allow(reader, card) {
-		b.hub.add(reader, card)
+		b.hub.add(reader, card, b.signedLine(reader, card))
 	}
+}
+
+// signedLine returns the base64 SSHSIG signature of the exact output line
+// "#<reader>:<card>" when a signer is configured, the empty string
+// otherwise. The signature covers the same bytes SignLine appends to the
+// stdout line (the '$' separator itself is never signed), so bridge
+// consumers and stdout consumers verify one identical signature.
+func (b *Bridge) signedLine(reader, card string) string {
+	if b.signer == nil {
+		return ""
+	}
+	return b.signer.Sign([]byte("#" + reader + ":" + card))
 }
 
 // Handler returns the HTTP surface of the bridge: the liveness probe,
@@ -280,12 +311,13 @@ func newBridgeHub(capacity int) *bridgeHub {
 }
 
 // add records one presentation, broadcasts it to every subscriber and
-// returns the assigned event.
-func (h *bridgeHub) add(reader, card string) BridgeEvent {
+// returns the assigned event. sig is the base64 SSHSIG line signature of
+// "#<reader>:<card>" when the bridge runs with a signer, empty otherwise.
+func (h *bridgeHub) add(reader, card, sig string) BridgeEvent {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.next++
-	ev := BridgeEvent{ID: h.next, Reader: reader, Card: card}
+	ev := BridgeEvent{ID: h.next, Reader: reader, Card: card, Sig: sig}
 	h.buf = append(h.buf, ev)
 	if len(h.buf) > h.cap {
 		h.buf = h.buf[len(h.buf)-h.cap:]

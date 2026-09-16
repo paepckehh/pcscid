@@ -142,6 +142,16 @@ origin, so the loopback http is not mixed content for an HTTPS page).
   suppressed for 3 s against prell events. Both are `BridgeOptions`,
   defaults via `bridgeCapacity` / `bridgeDedupWindow` /
   `bridgeStartupGrace`.
+- Line signatures: with `PCSCID_SIGN_KEY` set the sample app wires the
+  signer into the bridge (`BridgeOptions.Signer`), and every served
+  event carries the base64 SSHSIG signature of its exact output line
+  `#<reader>:<card>` in its `sig` field — byte-identical to the
+  signature `SignLine` appends to the stdout line (the `$` separator
+  is never signed or delivered), namespace `pcscid`, verifiable with
+  `ssh-keygen -Y verify`. Without a signer the `sig` field is omitted,
+  so unsigned deployments keep the lean payload shape. Consumers can
+  forward the field verbatim (chrony's kiosk punch endpoint strips an
+  optional leading `$` and verifies against the configured key).
 - `scripts/pcscid-bridge.service` is the ready-made systemd unit
   (After=pcscd) running the sample app with `PCSCID_HTTP_ADDR` set.
 

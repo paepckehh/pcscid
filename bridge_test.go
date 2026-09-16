@@ -3,6 +3,9 @@ package pcscid
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,7 +25,7 @@ func TestBridgeHubRingAndBroadcast(t *testing.T) {
 	ch, cancel := h.subscribe()
 	defer cancel()
 	for range 6 {
-		h.add("aaa-01", "card000001")
+		h.add("aaa-01", "card000001", "")
 	}
 	if len(h.since(0)) != 4 {
 		t.Fatalf("ring buffer must retain 4 events, got %d", len(h.since(0)))
@@ -95,6 +98,57 @@ func TestBridgeFeedDerivesTags(t *testing.T) {
 	}
 	if got[0].Card != "r3v-401-5gmr" {
 		t.Fatalf("card btag must be forwarded unchanged, got %q", got[0].Card)
+	}
+}
+
+// TestBridgeFeedSignsLines pins the signer wiring of the bridge: with a
+// Signer every served presentation carries the base64 SSHSIG signature of
+// its exact output line "#<reader>:<card>" — byte-identical to the signature
+// SignLine appends to the stdout line, the '$' separator itself never signed
+// — and without a signer the events stay unsigned with the sig field omitted
+// from the JSON. Consumers like chrony's kiosk punch endpoint can therefore
+// enforce signed punches from the bridge alone.
+func TestBridgeFeedSignsLines(t *testing.T) {
+	t.Parallel()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewSigner(writeOpenSSHKey(t, key, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := NewBridge(&BridgeOptions{Capacity: 8, StartupGrace: time.Nanosecond, Signer: s})
+	time.Sleep(time.Millisecond)
+	b.Feed(Event{Kind: KindInsert, Reader: "ACS ACR122U 01 00 00", Card: &Card{ID: "r3v-401-5gmr"}})
+	got := b.hub.since(0)
+	if len(got) != 1 {
+		t.Fatalf("one card event expected, got %+v", got)
+	}
+	want := s.Sign([]byte("#" + got[0].Reader + ":r3v-401-5gmr"))
+	if got[0].Sig != want {
+		t.Fatalf("bridge sig = %q, want the signature of the exact output line %q", got[0].Sig, "#"+got[0].Reader+":r3v-401-5gmr")
+	}
+	if _, err := base64.StdEncoding.DecodeString(got[0].Sig); err != nil {
+		t.Fatalf("bridge sig must be bare base64 (no '$' separator): %v", err)
+	}
+
+	// Without a signer the events stay unsigned and the JSON omits the sig
+	// field entirely, so unsigned deployments serve the same lean payload
+	// shape as before.
+	b2 := NewBridge(&BridgeOptions{Capacity: 8, StartupGrace: time.Nanosecond})
+	time.Sleep(time.Millisecond)
+	b2.Feed(Event{Kind: KindInsert, Reader: "ACS ACR122U 01 00 00", Card: &Card{ID: "r3v-401-5gmr"}})
+	got2 := b2.hub.since(0)
+	if len(got2) != 1 || got2[0].Sig != "" {
+		t.Fatalf("unsigned bridge must serve no signature, got %+v", got2)
+	}
+	body, err := json.Marshal(got2[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `"sig"`) {
+		t.Fatalf("unsigned bridge event must omit the sig field, got %s", body)
 	}
 }
 

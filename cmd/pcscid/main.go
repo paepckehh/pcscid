@@ -28,7 +28,9 @@
 // With PCSCID_SIGN_KEY set to the path of a usable, passphrase-less
 // ssh-ed25519 private key, every output line is extended by '$' and
 // the base64 SSHSIG signature of the line itself, verifiable with
-// ssh-keygen -Y verify under the namespace "pcscid".
+// ssh-keygen -Y verify under the namespace "pcscid" — and the bridge
+// serves the same signature per event in its sig field, so kiosk
+// pages can forward it to consumers that enforce signed punches.
 package main
 
 import (
@@ -73,6 +75,25 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The SSHSIG signer: when PCSCID_SIGN_KEY points at a usable
+	// ssh-ed25519 private key, every output line carries '$' and the
+	// base64 signature of the line itself, so downstream consumers can
+	// prove each line came from this kiosk — and the bridge serves the
+	// same signature per event (BridgeOptions.Signer), so kiosk pages can
+	// forward it to consumers that enforce signed punches. A configured
+	// but unusable key fails the startup instead of silently unsigned
+	// output. The signer loads BEFORE the bridge so one key serves both
+	// surfaces from the start.
+	var signer *pcscid.Signer
+	if keyPath := os.Getenv("PCSCID_SIGN_KEY"); keyPath != "" {
+		s, err := pcscid.NewSigner(keyPath)
+		if err != nil {
+			return fmt.Errorf("PCSCID_SIGN_KEY: %w", err)
+		}
+		signer = s
+		logger.Debug("line signatures enabled", "key", keyPath)
+	}
+
 	// The loopback HTTP bridge, off unless PCSCID_HTTP_ADDR configures
 	// it. A browser sandbox cannot open the pcscd Unix socket, so the
 	// bridge is the minimal local footprint for kiosk pages reacting
@@ -88,28 +109,13 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("bridge listen on %q: %w", bridgeAddr, err)
 		}
-		bridge = pcscid.NewBridge(nil)
+		bridge = pcscid.NewBridge(&pcscid.BridgeOptions{Signer: signer})
 		go func() {
 			logger.Debug("bridge listening", "addr", bridgeAddr)
 			if err := bridge.ServeListener(ctx, ln); err != nil {
 				fmt.Fprintln(os.Stderr, "pcscid bridge:", err)
 			}
 		}()
-	}
-
-	// The SSHSIG signer: when PCSCID_SIGN_KEY points at a usable
-	// ssh-ed25519 private key, every output line carries '$' and the
-	// base64 signature of the line itself, so downstream consumers can
-	// prove each line came from this kiosk. A configured but unusable
-	// key fails the startup instead of silently unsigned output.
-	var signer *pcscid.Signer
-	if keyPath := os.Getenv("PCSCID_SIGN_KEY"); keyPath != "" {
-		s, err := pcscid.NewSigner(keyPath)
-		if err != nil {
-			return fmt.Errorf("PCSCID_SIGN_KEY: %w", err)
-		}
-		signer = s
-		logger.Debug("line signatures enabled", "key", keyPath)
 	}
 
 	// Reader identity options: PCSCID_USB_PATH_ID allows the physical
