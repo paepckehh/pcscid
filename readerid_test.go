@@ -10,14 +10,16 @@ import (
 	"paepcke.de/pcscid/pcsc"
 )
 
-// fakeSysfsUSB writes a minimal sysfs USB device tree: one directory
-// per device with busnum, devnum and devpath files.
+// fakeSysfsUSB writes a minimal sysfs USB device tree shaped like the
+// real one: the bus directory holds symlinks, the device directories
+// live in a devices subtree with busnum, devnum and devpath files.
 func fakeSysfsUSB(t *testing.T, devices map[uint64]string) string {
 	t.Helper()
 	root := t.TempDir()
+	devicesRoot := filepath.Join(root, "devices")
 	for addr, devpath := range devices {
 		bus, dev := uint32(addr>>32), uint32(addr&0xFFFFFFFF)
-		dir := filepath.Join(root, devpath)
+		dir := filepath.Join(devicesRoot, devpath)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -29,6 +31,11 @@ func fakeSysfsUSB(t *testing.T, devices map[uint64]string) string {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+		}
+		// The real bus directory classifies by symlink, the resolver
+		// must stat through it.
+		if err := os.Symlink(filepath.Join(devicesRoot, devpath), filepath.Join(root, devpath)); err != nil {
+			t.Fatal(err)
 		}
 	}
 	return root
@@ -47,8 +54,9 @@ func itoa(n uint32) string {
 }
 
 // TestUsbPortPath pins the sysfs resolution: a bus/device address maps
-// to the kernel physical port path of the device directory, unknown
-// addresses and an empty root answer the empty string.
+// to the kernel physical port path of the device directory, through the
+// symlinks a real sysfs bus directory carries, and unknown addresses and
+// an empty root answer the empty string.
 func TestUsbPortPath(t *testing.T) {
 	t.Parallel()
 	root := fakeSysfsUSB(t, map[uint64]string{
@@ -141,8 +149,9 @@ func TestReaderTagWithUnit(t *testing.T) {
 
 // TestWatchIdentifiesIdenticalReadersByPort drives the whole watch
 // pipeline over two ACR122U style units: no usable serial (the vendor
-// placeholder), so the per-unit identity comes from the physical USB
-// port path resolved through the channel id.
+// placeholder), the USBPathID option is on, so the per-unit identity
+// comes from the physical USB port path resolved through the channel
+// id.
 func TestWatchIdentifiesIdenticalReadersByPort(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
@@ -155,6 +164,7 @@ func TestWatchIdentifiesIdenticalReadersByPort(t *testing.T) {
 	events, err := Watch(ctx, &Options{
 		SocketPath:   fake.Addr(),
 		SysfsUSBRoot: root,
+		USBPathID:    true,
 		Logger:       discardLogger(),
 	})
 	if err != nil {
@@ -197,6 +207,10 @@ func TestWatchIdentifiesIdenticalReadersByPort(t *testing.T) {
 	if tagA != ReaderTagWithUnit("ACS ACR122U", "", "1-2") {
 		t.Errorf("first tag = %q, want the port 1-2 derived tag", tagA)
 	}
+	// Watch carries the composed tag on the event itself.
+	if first.ReaderTag != tagA || second.ReaderTag != tagB {
+		t.Errorf("event reader tags = %q, %q, want the composed tags", first.ReaderTag, second.ReaderTag)
+	}
 	// The card identity stays reader independent.
 	if first.Card.ID != Btag("mifare classic 1k", uidA) {
 		t.Errorf("card id = %q, want the uid derived btag", first.Card.ID)
@@ -221,5 +235,195 @@ func TestWatchNoUnitFactsFallsBackToModelTag(t *testing.T) {
 	}
 	if ReaderTagWithUnit(ev.Reader, ev.ReaderSerial, ev.ReaderPort) != ReaderTag(ev.Reader) {
 		t.Error("no unit facts must fall back to the model tag")
+	}
+}
+
+// TestWatchUSBPathIDDisabledByDefault pins the opt-in: without
+// USBPathID the channel id is not even probed, a serial-less reader
+// keeps the model level tag even when a port path would resolve.
+func TestWatchUSBPathIDDisabledByDefault(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	root := fakeSysfsUSB(t, map[uint64]string{
+		(uint64(1) << 32) | 0x22: "1-2",
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	events, err := Watch(ctx, &Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root, // would resolve, but the option is off
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	fake.SetSerial("ACS ACR122U 01 00 00", "0") // placeholder, no usable serial
+	fake.SetChannelID("ACS ACR122U 01 00 00", 0x00200122)
+	ev := receiveEvent(t, events, 3*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.ReaderPort != "" {
+		t.Errorf("reader port = %q, want empty with the option off", ev.ReaderPort)
+	}
+	if ev.ReaderTag != ReaderTag(ev.Reader) {
+		t.Errorf("reader tag = %q, want the model tag %q", ev.ReaderTag, ReaderTag(ev.Reader))
+	}
+}
+
+// fakeSysfsNet writes a minimal sysfs class/net tree shaped like the
+// real one: symlinked interface entries whose targets carry type,
+// address and the optional phy80211 and device markers.
+func fakeSysfsNet(t *testing.T, ifaces []fakeNetIface) string {
+	t.Helper()
+	root := t.TempDir()
+	devicesRoot := filepath.Join(root, "devices")
+	for _, ifc := range ifaces {
+		dir := filepath.Join(devicesRoot, ifc.name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{"type": ifc.kind}
+		if ifc.mac != "" {
+			files["address"] = ifc.mac
+		}
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ifc.wireless {
+			if err := os.MkdirAll(filepath.Join(dir, "phy80211"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ifc.physical {
+			target := filepath.Join(root, "pci-device")
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(dir, "device")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(dir, filepath.Join(root, ifc.name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+type fakeNetIface struct {
+	name     string
+	kind     string // sysfs type, "1" is ethernet
+	mac      string // empty means no address file
+	wireless bool   // phy80211 marker
+	physical bool   // device symlink marker
+}
+
+// TestMachineID pins the network stack filter: only physical ethernet
+// ports with a burned in MAC count, sorted and joined; wireless,
+// virtual and unassigned interfaces never do.
+func TestMachineID(t *testing.T) {
+	t.Parallel()
+	root := fakeSysfsNet(t, []fakeNetIface{
+		{name: "eno2", kind: "1", mac: "aa:bb:cc:dd:ee:02", physical: true},
+		{name: "eno1", kind: "1", mac: "aa:bb:cc:dd:ee:01", physical: true},
+		{name: "wlan0", kind: "1", mac: "aa:bb:cc:dd:ee:03", physical: true, wireless: true},
+		{name: "lo", kind: "772", mac: "00:00:00:00:00:00"},
+		{name: "br0", kind: "1", mac: "d6:fc:3c:b9:ca:fd"},
+		{name: "eno1.100", kind: "1", mac: "aa:bb:cc:dd:ee:01"}, // vlan, shares the parent mac
+		{name: "eno3", kind: "1", mac: "00:00:00:00:00:00", physical: true},
+		{name: "eno4", kind: "1", physical: true}, // no address file
+	})
+	want := "aa:bb:cc:dd:ee:01|aa:bb:cc:dd:ee:02"
+	if got := machineIDFrom(root); got != want {
+		t.Errorf("machineIDFrom = %q, want %q", got, want)
+	}
+	if got := machineIDFrom(filepath.Join(root, "absent")); got != "" {
+		t.Errorf("machineIDFrom(absent) = %q, want empty", got)
+	}
+}
+
+// TestReaderTagWithMachine pins the machine mixed derivation: the
+// machine component separates identical readers across machines, the
+// unit facts stay prefixed by their kind, and the empty machine falls
+// back to the plain unit derivation.
+func TestReaderTagWithMachine(t *testing.T) {
+	t.Parallel()
+	reader := "ACS ACR122U 01 00 00"
+	if ReaderTagWithMachine(reader, "A001", "", "") != ReaderTagWithSerial(reader, "A001") {
+		t.Error("empty machine must fall back to ReaderTagWithUnit")
+	}
+	machineA, machineB := "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"
+	if ReaderTagWithMachine(reader, "", "1-2", machineA) == ReaderTagWithMachine(reader, "", "1-2", machineB) {
+		t.Error("the same reader on two machines must serve different tags")
+	}
+	// A serial and a port path of the same text must never collide.
+	if ReaderTagWithMachine(reader, "1-2", "", machineA) == ReaderTagWithMachine(reader, "", "1-2", machineA) {
+		t.Error("serial:1-2 and port:1-2 must hash differently")
+	}
+	// The machine alone still separates the model on two machines.
+	if ReaderTagWithMachine(reader, "", "", machineA) == ReaderTagWithMachine(reader, "", "", machineB) {
+		t.Error("the machine must take part even without unit facts")
+	}
+	if ReaderTagWithMachine(reader, "", "", machineA) == ReaderTag(reader) {
+		t.Error("machine mixed tag must differ from the model tag")
+	}
+	// Deterministic, and the hotplug indices stay stripped.
+	if ReaderTagWithMachine("ACS ACR122U 02 00 00", "", "1-2", machineA) != ReaderTagWithMachine(reader, "", "1-2", machineA) {
+		t.Error("the same facts must keep their tag across hotplug indices")
+	}
+}
+
+// TestWatchMACIDScopesReadersToTheMachine drives the machine identity
+// through the whole watch pipeline: two serial-less units on their
+// ports get tags composed of port and machine identity, distinct per
+// unit and per machine.
+func TestWatchMACIDScopesReadersToTheMachine(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	root := fakeSysfsUSB(t, map[uint64]string{
+		(uint64(1) << 32) | 0x22: "1-2",
+		(uint64(2) << 32) | 0x33: "2-1.4",
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	events, err := Watch(ctx, &Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root,
+		USBPathID:    true,
+		MACID:        true,
+		MachineID:    "aa:bb:cc:dd:ee:01",
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	fake.SetSerial("ACS ACR122U 01 00 00", "0")
+	fake.SetChannelID("ACS ACR122U 01 00 00", 0x00200122)
+	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, []byte{0x04, 0xAA, 0xBB, 0xCC})
+	fake.SetSerial("ACS ACR122U 02 00 00", "0")
+	fake.SetChannelID("ACS ACR122U 02 00 00", 0x00200233)
+
+	first := receiveEvent(t, events, 3*time.Second)
+	if first.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", first.Kind)
+	}
+	second := receiveEvent(t, events, 3*time.Second)
+	if second.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", second.Kind)
+	}
+	if first.ReaderTag == second.ReaderTag {
+		t.Errorf("two units on different ports share one machine scoped tag: %q", first.ReaderTag)
+	}
+	want := ReaderTagWithMachine(first.Reader, "", "1-2", "aa:bb:cc:dd:ee:01")
+	if first.ReaderTag != want {
+		t.Errorf("first tag = %q, want the port and machine derived tag %q", first.ReaderTag, want)
+	}
+	if first.ReaderTag == ReaderTagWithUnit(first.Reader, "", "1-2") {
+		t.Error("the machine must take part in the composed tag")
 	}
 }

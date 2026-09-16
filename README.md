@@ -45,7 +45,35 @@ ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) )[:10]    # → xxx-xx
 | `card-type` | detected from the ATR: PC/SC part 3 contactless table (`mifare classic 1k`, `mifare ultralight ev1`, `felica`, `picopass 16k`, …), known full ATRs (`german eid/passport (npa)`, `yubikey 5 nfc`, `deutschlandticket (vdv-ka)`), or `unknown` |
 | `uid` | the card's own unique tag (4/7/10 bytes). When neither card nor reader provides one, the ATR is used and the ID degrades to type level — `Card.Source` says which |
 
-The derivation is a pure function of card type + tag: no timestamps, no reader names, no machine state. The same card produces the same btag everywhere, forever — the digest is pinned by golden tests, so it can never change silently on you. Readers get the same treatment: `ReaderTag` hashes the normalized pcscd reader name (volatile hotplug indices stripped) into a stable `xx-xxxx-xx` tag that follows the hardware across machines and USB ports.
+The derivation is a pure function of card type + tag: no timestamps, no reader names, no machine state. The same card produces the same btag everywhere, forever — the digest is pinned by golden tests, so it can never change silently on you.
+
+### Reader identity: model, unit, machine
+
+Readers get the same treatment, with three tiers in decreasing portability:
+
+| Tier | Input | Tag domain | Stable across | Enabled by |
+| --- | --- | --- | --- | --- |
+| Model | normalized pcscd reader name (volatile hotplug indices stripped) | `pcscid/reader/v1` | everything | always |
+| Unit: hardware serial | `SCARD_ATTR_VENDOR_IFD_SERIAL_NO`, the USB iSerial burned into the unit | `pcscid/reader/v2` | machines, ports, daemon restarts | always (when the driver serves one) |
+| Unit: USB port path | `SCARD_ATTR_CHANNEL_ID` → sysfs `devpath` (e.g. `2-1.3`) | `pcscid/reader/v3` | daemon restarts, reboots, same port | `PCSCID_USB_PATH_ID=1` |
+| Machine scope | `MachineID()`, the MAC addresses of the physical ethernet ports | `pcscid/reader/m1` | everything within one machine | `PCSCID_MAC_ID=1` |
+
+Two units of the same model that report **no usable serial** — the ACS ACR122U family ships the same all-zero iSerial on every unit — collide on the model tag. The two options close that gap, opt-in because each trades portability:
+
+```console
+# Anchor serial-less readers to their physical USB port:
+# distinct tag per unit, stable as long as it stays in its port.
+$ PCSCID_USB_PATH_ID=1 ./pcscid
+
+# Scope every reader tag to this machine's hardware MACs:
+# identical readers on different kiosks get distinct tags.
+$ PCSCID_MAC_ID=1 ./pcscid
+
+# Fleet of kiosks, one ACR122U per port: combine both.
+$ PCSCID_USB_PATH_ID=1 PCSCID_MAC_ID=1 ./pcscid
+```
+
+The MAC filter takes only **physical ethernet ports** (sysfs `type` 1, a backing `device`, no `phy80211`): wifi, loopback, bridges, bonds, vlans and veth never enter the machine identity. The unit facts travel in `Event.ReaderSerial` / `Event.ReaderPort`, the composed tag in `Event.ReaderTag`. On the ACR122U specifically, neither the iSerial nor any NVRAM field is writable by host software — the port anchor is the only software-only per-unit identity that hardware has.
 
 ## Quick start
 
@@ -79,17 +107,19 @@ $ PCSCID_SIGN_KEY=/etc/pcscid/id_ed25519 ./pcscid
 #qr-xlrk-i5:r3v-401-5gmr$U1NIU0lHAAAAAQAAA…
 ```
 
-A kiosk's consumers can prove every line came from that machine: the signature covers the exact bytes of the line, the namespace is `pcscid`. Verify with the stock ssh-keygen (the base64 blob is the armored block's payload):
+A kiosk's consumers can prove every line came from that machine. Verify with the stock ssh-keygen (the base64 blob is the armored block's payload, wrapped at 70 columns):
 
 ```console
 $ line='#qr-xlrk-i5:r3v-401-5gmr$U1NIU0lHAAAAAQAAA…'
-$ printf '%s' "${line%%$*}" > msg
+$ printf '%s' "${line%%\$*}" > msg          # the message: everything before the $
 $ (echo "-----BEGIN SSH SIGNATURE-----"; \
-    echo "${line#*$}" | fold -w 70; echo "-----END SSH SIGNATURE-----") > sig
+    echo "${line#*\$}" | fold -w 70; echo "-----END SSH SIGNATURE-----") > sig
 $ echo "kiosk $(cat id_ed25519.pub)" > allowed_signers
 $ ssh-keygen -Y verify -f allowed_signers -I kiosk -n pcscid -s sig < msg
 Good "pcscid" signature for kiosk with ED25519 key SHA256:…
 ```
+
+Mind the `\$` escapes: an unescaped `${line%%$*}` expands `$*` (the shell's positional parameters) instead of matching the literal `$`, and the verification fails. The signature covers the exact bytes of the line (`#<reader-tag>:<btag>`), the namespace is `pcscid`.
 
 A configured but unusable key (encrypted, wrong type, damaged) fails the startup instead of silently producing unsigned output.
 
@@ -100,13 +130,51 @@ A browser sandbox cannot open `/run/pcscd/pcscd.comm` — no Unix sockets from W
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | `{"ok":true,"version":...}` liveness probe |
-| `GET /events` | SSE stream (hello event, then one `card` event per scan, 20 s keep-alive) |
-| `GET /pending?after=N` | JSON `{events:[...]}` polling fallback, replay by monotonic cursor |
+| `GET /events` | SSE stream: `hello` event, then one `card` event per scan, 20 s keep-alive comments |
+| `GET /pending?after=N` | JSON `{"events":[...]}` polling fallback, replay by monotonic cursor |
 
 | Variable | Effect |
 | --- | --- |
 | `PCSCID_HTTP_ADDR` | Bridge listen address, e.g. `127.0.0.1:8976`. Empty (the default) disables bridge mode |
 | `PCSCID_HTTP_ALLOW_REMOTE` | `1` lifts the loopback guard. Without it only loopback addresses are accepted — **card identities must never leave the kiosk by accident** |
+
+Worked examples against a running bridge:
+
+```console
+$ curl http://127.0.0.1:8976/health
+{"ok":true,"version":"v0.0.141"}
+
+$ curl -N http://127.0.0.1:8976/events
+event: hello
+data: {"version":"v0.0.141"}
+
+: keep-alive
+
+event: card
+data: {"id":1,"reader":"qr-xlrk-i5","card":"r3v-401-5gmr"}
+
+$ curl 'http://127.0.0.1:8976/pending?after=0'
+{"events":[{"id":1,"reader":"qr-xlrk-i5","card":"r3v-401-5gmr"}]}
+```
+
+A kiosk page listens with a few lines of JavaScript — the permissive CORS is what allows an HTTPS page to read the loopback stream:
+
+```js
+const events = new EventSource("http://127.0.0.1:8976/events");
+events.addEventListener("card", (e) => {
+  const scan = JSON.parse(e.data);   // {id, reader, card}
+  console.log(scan.reader, scan.card);
+});
+
+// Polling fallback (browsers or embedders without EventSource):
+async function pending(after) {
+  const r = await fetch(`http://127.0.0.1:8976/pending?after=${after}`);
+  const {events} = await r.json();
+  return events;                      // [{id, reader, card}], oldest first
+}
+```
+
+The `id` cursor is monotonic: pass the last seen `id` as `after` and `/pending` replays only what came after it (the ring retains the last 64 presentations). Every endpoint answers with `Access-Control-Allow-Origin: *`; unsupported methods are rejected with 405.
 
 A 2 s startup grace swallows Watch's initial "cards already present" report (a card left on a reader never triggers after a service restart) and the same reader+card pair is debounced for 3 s. `scripts/pcscid-bridge.service` is the ready-made, hardened systemd unit (`After=pcscd`, `DynamicUser`, `ProtectSystem=strict`, …).
 
@@ -139,7 +207,10 @@ The fine-grained pieces are exported too:
 ```go
 pcscid.DetectType(atr)     // "mifare classic 1k"
 pcscid.ParseATR(atr)       // full ISO 7816-3 breakdown, with TCK check
-pcscid.ReaderTag(reader)    // the xx-xxxx-xx reader tag
+pcscid.ReaderTag(reader)         // the model level xx-xxxx-xx reader tag
+pcscid.ReaderTagWithUnit(r, serial, port)  // + hardware serial / USB port identity
+pcscid.ReaderTagWithMachine(r, serial, port, mac) // + machine identity
+pcscid.MachineID()          // physical ethernet MACs, "aa:…|aa:…"
 pcscid.Btag(type, uid)     // the xxx-xxx-xxxx btag
 ```
 

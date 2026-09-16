@@ -492,7 +492,7 @@ func TestWatchDaemonRestartDoesNotReReport(t *testing.T) {
 	t.Cleanup(func() { clA.Close() })
 	done := make(chan error, 1)
 	go func() {
-		done <- pollLoop(ctx, clA, tracking, "", lg, ch)
+		done <- pollLoop(ctx, clA, tracking, watchEnv{}, lg, ch)
 	}()
 	ev := receiveEvent(t, ch, 3*time.Second)
 	if ev.Kind != KindInsert {
@@ -516,7 +516,7 @@ func TestWatchDaemonRestartDoesNotReReport(t *testing.T) {
 	ch2 := make(chan Event, 8)
 	done2 := make(chan error, 1)
 	go func() {
-		done2 <- pollLoop(ctx2, clB, tracking, "", lg, ch2)
+		done2 <- pollLoop(ctx2, clB, tracking, watchEnv{}, lg, ch2)
 	}()
 	select {
 	case ev := <-ch2:

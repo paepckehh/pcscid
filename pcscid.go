@@ -72,6 +72,14 @@ type Event struct {
 	Card *Card
 	// Reader is the reader name the event belongs to.
 	Reader string
+	// ReaderTag is the reader tag as derived by Watch from every
+	// identity source the Options enabled: the reader name, the unit
+	// facts (ReaderSerial, ReaderPort) and the machine identity
+	// (Options.MACID). It is set for KindInsert events, empty for
+	// KindRemove, which carries no card connection to probe facts
+	// with. It equals ReaderTagWithUnit(ev.Reader, ev.ReaderSerial,
+	// ev.ReaderPort) unless MACID mixed the machine in.
+	ReaderTag string
 	// ReaderSerial is the hardware serial number of the reader
 	// (SCARD_ATTR_VENDOR_IFD_SERIAL_NO, the USB iSerial string of the
 	// unit) when the driver serves a usable one, empty otherwise.
@@ -83,9 +91,10 @@ type Event struct {
 	// ReaderPort is the kernel physical USB port path of the reader
 	// (sysfs devpath, for example "2-1.3"), resolved through its
 	// SCARD_ATTR_CHANNEL_ID bus/device address when the driver serves
-	// no usable serial. It anchors the unit to its port: stable across
-	// daemon restarts and reboots, but moving the reader to another
-	// port changes it. Only insertions carry it.
+	// no usable serial and Options.USBPathID allows it. It anchors the
+	// unit to its port: stable across daemon restarts and reboots, but
+	// moving the reader to another port changes it. Only insertions
+	// carry it.
 	ReaderPort string
 }
 
@@ -103,6 +112,26 @@ type Options struct {
 	// default /sys/bus/usb/devices. It exists to test the port based
 	// reader identity fallback against a fake device tree.
 	SysfsUSBRoot string
+	// USBPathID allows the physical USB port path as the per-unit
+	// fallback for readers serving no usable hardware serial (the ACS
+	// ACR122U family). Off by default, because the port path is stable
+	// only as long as the reader stays in its port: moving the reader
+	// to another port or machine changes the tag. The sample app wires
+	// PCSCID_USB_PATH_ID to it.
+	USBPathID bool
+	// MACID mixes the machine identity, the stable hardware MAC
+	// addresses of the physical ethernet ports (MachineID), into every
+	// reader tag: identical readers on different machines get distinct
+	// tags, at the price of the tag no longer following the reader to
+	// another machine. Off by default. The sample app wires
+	// PCSCID_MAC_ID to it.
+	MACID bool
+	// MachineID overrides the machine identity used when MACID is
+	// enabled. Empty uses MachineID(), which is empty again on machines
+	// without a physical ethernet port; those then keep the unit level
+	// tags. It exists as the injection point of a caller chosen
+	// machine identity and for tests.
+	MachineID string
 }
 
 // btagAlphabet is the alphabet the btag and reader tag encode their
@@ -201,6 +230,34 @@ func ReaderTagWithUnit(reader, serial, port string) string {
 	}
 }
 
+// ReaderTagWithMachine adds the machine identity to the reader tag:
+// the machine component (MachineID or an explicit override, wired by
+// Options.MACID / PCSCID_MAC_ID) is mixed into every derivation when
+// it is not empty, so identical readers on different machines serve
+// distinct tags. The price is portability: a tag derived with a
+// machine component does not follow the reader to another machine.
+// The hash domain is pcscid/reader/m1 with the unit fact kind
+// prefixed ("serial:...", "port:...", or "model"), so a serial and a
+// port path of the same text can never collide. An empty machine
+// falls back to ReaderTagWithUnit.
+func ReaderTagWithMachine(reader, serial, port, machine string) string {
+	if machine == "" {
+		return ReaderTagWithUnit(reader, serial, port)
+	}
+	var unit string
+	switch {
+	case serial != "":
+		unit = "serial:" + serial
+	case port != "":
+		unit = "port:" + port
+	default:
+		unit = "model"
+	}
+	sum := digestID([]byte("pcscid/reader/m1|"),
+		[]byte(normalizeReaderName(reader)), []byte("|"), []byte(unit), []byte("|"), []byte(machine))
+	return btagFormat(sum[:], 8, 2, 6)
+}
+
 // normalizeReaderName strips the trailing pcscd hotplug index groups
 // (space separated one or two digit decimal numbers) from a reader name,
 // keeping the stable product part.
@@ -241,29 +298,50 @@ func isHotplugIndex(s string) bool {
 //
 // The channel is closed once ctx is cancelled.
 func Watch(ctx context.Context, opts *Options) (<-chan Event, error) {
-	lg, socketPath, sysfsRoot := watchOptions(opts)
-	cl, err := pcsc.New(socketPath, lg)
+	lg, env := watchOptions(opts)
+	cl, err := pcsc.New(env.socketPath, lg)
 	if err != nil {
 		return nil, fmt.Errorf("pcscid: pcscd unavailable: %w", err)
 	}
 	ch := make(chan Event, 8)
-	go watchLoop(ctx, cl, socketPath, sysfsRoot, lg, ch)
+	if env.machine != "" {
+		lg.Debug("machine identity mixed into reader tags", "machine", env.machine)
+	}
+	go watchLoop(ctx, cl, env, lg, ch)
 	return ch, nil
 }
 
-func watchOptions(opts *Options) (lg *slog.Logger, socketPath, sysfsRoot string) {
+// watchEnv carries the identity configuration of one watch loop.
+type watchEnv struct {
+	socketPath string
+	sysfsRoot  string
+	useUSBPath bool
+	machine    string
+}
+
+func watchOptions(opts *Options) (lg *slog.Logger, env watchEnv) {
 	lg = slog.New(slog.DiscardHandler)
-	sysfsRoot = defaultSysfsUSB
+	env = watchEnv{
+		sysfsRoot: defaultSysfsUSB,
+		machine:   "",
+	}
 	if opts != nil {
 		if opts.Logger != nil {
 			lg = opts.Logger
 		}
-		socketPath = opts.SocketPath
+		env.socketPath = opts.SocketPath
 		if opts.SysfsUSBRoot != "" {
-			sysfsRoot = opts.SysfsUSBRoot
+			env.sysfsRoot = opts.SysfsUSBRoot
+		}
+		env.useUSBPath = opts.USBPathID
+		if opts.MACID {
+			env.machine = opts.MachineID
+			if env.machine == "" {
+				env.machine = MachineID()
+			}
 		}
 	}
-	return lg, socketPath, sysfsRoot
+	return lg, env
 }
 
 // reconnectDelay is the pause between two pcscd reconnection
@@ -277,14 +355,14 @@ const waitTick = time.Second
 
 // watchLoop keeps a client alive across pcscd restarts and drives
 // the state change handling.
-func watchLoop(ctx context.Context, cl *pcsc.Client, socketPath, sysfsRoot string, lg *slog.Logger, ch chan<- Event) {
+func watchLoop(ctx context.Context, cl *pcsc.Client, env watchEnv, lg *slog.Logger, ch chan<- Event) {
 	defer close(ch)
 	tracking := newTracking()
 	for {
 		// Closing the connection is the cancellation path of a
 		// blocked WaitChange.
 		stopClose := context.AfterFunc(ctx, func() { cl.Close() })
-		err := pollLoop(ctx, cl, tracking, sysfsRoot, lg, ch)
+		err := pollLoop(ctx, cl, tracking, env, lg, ch)
 		stopClose()
 		cl.Close()
 		if ctx.Err() != nil {
@@ -297,7 +375,7 @@ func watchLoop(ctx context.Context, cl *pcsc.Client, socketPath, sysfsRoot strin
 				return
 			case <-time.After(reconnectDelay):
 			}
-			next, dialErr := pcsc.New(socketPath, lg)
+			next, dialErr := pcsc.New(env.socketPath, lg)
 			if dialErr != nil {
 				lg.Debug("pcscd reconnect failed", "error", dialErr)
 				continue
@@ -324,7 +402,7 @@ func newTracking() *readerTracking {
 
 // pollLoop processes reader state changes until the transport breaks
 // or ctx is cancelled.
-func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, sysfsRoot string, lg *slog.Logger, ch chan<- Event) error {
+func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, env watchEnv, lg *slog.Logger, ch chan<- Event) error {
 	// The event counters of a fresh connection mean nothing yet: a
 	// restarted daemon counts from zero again, so a still present
 	// card must not be re-reported just because its counter moved.
@@ -350,9 +428,10 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, sy
 					// The unit attributes need an open card
 					// connection, so the individual reader identity is
 					// only readable now, while the card is there.
-					serial, port := probeReaderUnit(cl, lg, st.Reader, sysfsRoot)
-					card := identify(cl, lg, st, serial, port)
-					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderSerial: serial, ReaderPort: port}) {
+					serial, port := probeReaderUnit(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath)
+					card := identify(cl, lg, st, serial, port, env.machine)
+					tag := ReaderTagWithMachine(st.Reader, serial, port, env.machine)
+					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderTag: tag, ReaderSerial: serial, ReaderPort: port}) {
 						return nil
 					}
 				}
@@ -404,7 +483,7 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, sy
 }
 
 // identify builds the Card for a present reader state.
-func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial, port string) *Card {
+func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial, port, machine string) *Card {
 	cardType := DetectType(st.ATR)
 	card := &Card{Type: cardType, ATR: st.ATR, Reader: st.Reader}
 	uid, protocol := probeUID(cl, lg, st.Reader)
@@ -419,7 +498,7 @@ func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial, por
 	lg.Debug("card inserted",
 		"reader", st.Reader,
 		"id", card.ID,
-		"reader-tag", ReaderTagWithUnit(st.Reader, serial, port),
+		"reader-tag", ReaderTagWithMachine(st.Reader, serial, port, machine),
 		"reader-serial", serial,
 		"type", cardType,
 		"source", card.Source,

@@ -14,6 +14,17 @@
 // open the pcscd Unix socket can react to card scans. The address
 // must be loopback unless PCSCID_HTTP_ALLOW_REMOTE=1 lifts the guard.
 //
+// With PCSCID_USB_PATH_ID set to 1, readers whose driver serves no
+// usable hardware serial (the all zero iSerial of the ACS ACR122U
+// family) are identified by their physical USB port path instead of
+// falling back to the model level tag: one distinct tag per unit,
+// stable as long as the reader stays in its port.
+//
+// With PCSCID_MAC_ID set to 1, the machine identity, the MAC
+// addresses of the physical ethernet ports, is mixed into every
+// reader tag: identical readers on different machines serve distinct
+// tags.
+//
 // With PCSCID_SIGN_KEY set to the path of a usable, passphrase-less
 // ssh-ed25519 private key, every output line is extended by '$' and
 // the base64 SSHSIG signature of the line itself, verifiable with
@@ -101,7 +112,17 @@ func run() error {
 		logger.Debug("line signatures enabled", "key", keyPath)
 	}
 
-	events, err := pcscid.Watch(ctx, &pcscid.Options{Logger: logger})
+	// Reader identity options: PCSCID_USB_PATH_ID allows the physical
+	// USB port path as the per-unit fallback for serial-less readers
+	// (stable per port, changes when the reader moves), PCSCID_MAC_ID
+	// mixes the machine identity, the hardware MAC addresses of the
+	// physical ethernet ports, into every reader tag (distinct tags
+	// per machine, not portable across machines).
+	events, err := pcscid.Watch(ctx, &pcscid.Options{
+		Logger:    logger,
+		USBPathID: envEnabled("PCSCID_USB_PATH_ID"),
+		MACID:     envEnabled("PCSCID_MAC_ID"),
+	})
 	if err != nil {
 		return err
 	}
@@ -109,7 +130,11 @@ func run() error {
 		if ev.Kind != pcscid.KindInsert {
 			continue
 		}
-		line := "#" + pcscid.ReaderTagWithUnit(ev.Reader, ev.ReaderSerial, ev.ReaderPort) + ":" + ev.Card.ID
+		readerTag := ev.ReaderTag
+		if readerTag == "" {
+			readerTag = pcscid.ReaderTagWithUnit(ev.Reader, ev.ReaderSerial, ev.ReaderPort)
+		}
+		line := "#" + readerTag + ":" + ev.Card.ID
 		if signer != nil {
 			line = signer.SignLine(line)
 		}

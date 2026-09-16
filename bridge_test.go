@@ -122,6 +122,25 @@ func TestBridgeFeedSerialDistinctReaders(t *testing.T) {
 	}
 }
 
+// TestBridgeFeedUsesEventReaderTag pins the passthrough: a Watch
+// event already carrying its composed reader tag (machine identity
+// mixed in, for example) is served unchanged, only events without one
+// fall back to the local derivation.
+func TestBridgeFeedUsesEventReaderTag(t *testing.T) {
+	t.Parallel()
+	b := NewBridge(&BridgeOptions{Capacity: 8, StartupGrace: time.Nanosecond})
+	time.Sleep(time.Millisecond)
+	tag := ReaderTagWithMachine("ACS ACR122U 01 00 00", "", "1-2", "aa:bb:cc:dd:ee:01")
+	b.Feed(Event{Kind: KindInsert, Reader: "ACS ACR122U 01 00 00", ReaderTag: tag, Card: &Card{ID: "card000001"}})
+	got := b.hub.since(0)
+	if len(got) != 1 {
+		t.Fatalf("one event expected, got %+v", got)
+	}
+	if got[0].Reader != tag {
+		t.Fatalf("reader tag = %q, want the event tag %q unchanged", got[0].Reader, tag)
+	}
+}
+
 // TestBridgeHealthAndPending exercises the polling surface of the
 // Handler: /health answers the liveness probe, /pending replays events
 // by cursor, both with permissive CORS headers for HTTPS kiosk pages.

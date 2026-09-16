@@ -9,10 +9,14 @@ whole line, then reader tag, btag) per line
 in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
 `PCSCID_HTTP_ADDR` (env var config) turns on the loopback HTTP
 bridge of the same binary for browser pages that cannot open the
-pcscd socket. `PCSCID_SIGN_KEY` (path to a passphrase-less ssh-ed25519
-private key) appends `$` and a base64 SSHSIG signature (namespace
-`pcscid`, verifiable with `ssh-keygen -Y verify`) to every output
-line; an unusable key fails the startup.
+pcscd socket. `PCSCID_USB_PATH_ID=1` opts into the physical USB port
+path as the per-unit reader identity for serial-less readers (stable
+per port, changes when the reader moves), `PCSCID_MAC_ID=1` mixes
+the machine identity (MAC addresses of the physical ethernet ports)
+into every reader tag. `PCSCID_SIGN_KEY` (path to a passphrase-less
+ssh-ed25519 private key) appends `$` and a base64 SSHSIG signature
+(namespace `pcscid`, verifiable with `ssh-keygen -Y verify`) to every
+output line; an unusable key fails the startup.
 
 ## Fixed workflow — every task, no exceptions, ALWAYS: test, commit, push! ALWAYS, DO NOT ASK!
 
@@ -88,17 +92,28 @@ ACR122U iSerial is fixed in its controller firmware and no public
 tool writes it, the ACR122U escape command set has no NVRAM store
 (the only persistent field is the 1 byte PICC operating parameter,
 too small and RF-behavior-changing to serve as an ID). Such serial
-less readers are anchored by their physical USB port instead:
+less readers are anchored by their physical USB port instead, but
+only with the opt-in `PCSCID_USB_PATH_ID` / `Options.USBPathID`,
+because the port path is not portable:
 `SCARD_ATTR_CHANNEL_ID` (0x0110) answers the CCID packing
 `0x0020<<16 | bus<<8 | device`, resolved through sysfs
-(`/sys/bus/usb/devices`, busnum/devnum/devnum files, pure Go) to
-the kernel port path (devpath, `2-1.3`), which `ReaderTagWithUnit`
+(`/sys/bus/usb/devices`, busnum/devnum/devpath files, pure Go — the
+bus directory entries are symlinks, the resolver stats through them)
+to the kernel port path (devpath, `2-1.3`), which `ReaderTagWithUnit`
 mixes in as hash domain `pcscid/reader/v3` — stable per port across
 daemon restarts and reboots, but it changes when the reader moves
-to another port, so it is only the fallback when no usable serial
-exists. Precedence: serial, port path, model tag. The facts travel
-in `Event.ReaderSerial` and `Event.ReaderPort`, only insertions
-carry them (the attributes need the card connection); readers whose
+to another port. `MachineID()` reads the network stack through
+sysfs (`/sys/class/net`) for the stable hardware MAC addresses of
+the physical ethernet ports (type ethernet, backing device symlink,
+no phy80211, non zero MAC: wifi, lo, bridges, bonds, vlans and veth
+never qualify), and `PCSCID_MAC_ID` / `Options.MACID` mixes that
+machine identity into every reader tag through `ReaderTagWithMachine`
+(hash domain `pcscid/reader/m1`, the unit fact kind prefixed with
+`serial:`/`port:`/`model` so the namespaces cannot collide). Precedence:
+serial, opt-in port path, model tag; the machine component is mixed
+into whichever tier applies when enabled. The composed tag travels
+in `Event.ReaderTag` (insertions only), the raw facts in
+`Event.ReaderSerial` and `Event.ReaderPort`; readers whose
 driver serves neither keep the model level tag, nothing can
 distinguish those by software.
 
@@ -108,7 +123,8 @@ A browser sandbox cannot reach the pcscd socket (no Unix sockets from
 WASM/JS, no WebUSB/WebHID in Firefox, no raw sockets in WebExtensions),
 so `bridge.go` provides the minimal local footprint for kiosk pages:
 `pcscid.Bridge` feeds Watch insertions through the tag derivation
-(ReaderTagWithUnit + Btag) and a dedup guard and serves them as SSE + polling
+(Event.ReaderTag, falling back to ReaderTagWithUnit + Btag) and a
+dedup guard and serves them as SSE + polling
 JSON with permissive CORS (loopback is a potentially trustworthy
 origin, so the loopback http is not mixed content for an HTTPS page).
 
