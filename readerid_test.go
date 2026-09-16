@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -278,13 +279,15 @@ func TestWatchUSBPathIDDisabledByDefault(t *testing.T) {
 
 // fakeUSBDevice describes one device of a fake sysfs USB tree for the
 // name based port resolution: the identification strings pcscd's
-// reader names are built from, and the USB interface classes of the
-// device.
+// reader names are built from, the USB interface classes of the
+// device, and the optional URB counter file the traffic correlation
+// reads.
 type fakeUSBDevice struct {
 	devpath      string
 	manufacturer string
 	product      string
 	ifaces       []string // bInterfaceClass values, "0b" is CCID
+	urbnum       string   // empty means no urbnum file
 }
 
 // fakeSysfsUSBNamed writes a minimal sysfs USB device tree carrying
@@ -305,6 +308,9 @@ func fakeSysfsUSBNamed(t *testing.T, devices []fakeUSBDevice) string {
 			"devpath":      dev.devpath,
 			"manufacturer": dev.manufacturer,
 			"product":      dev.product,
+		}
+		if dev.urbnum != "" {
+			files["urbnum"] = dev.urbnum
 		}
 		for name, content := range files {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o644); err != nil {
@@ -333,9 +339,9 @@ func fakeSysfsUSBNamed(t *testing.T, devices []fakeUSBDevice) string {
 // TestUsbPortPathByReader pins the name based fallback: a CCID device
 // whose manufacturer and product strings carry the reader name is the
 // reader, its devpath is the port. Non CCID devices and CCID devices of
-// another model never match; two identical units resolve positionally
-// when the daemon order matches the sysfs order, and a count mismatch
-// answers a qualified reason instead of guessing.
+// another model never match; identical units resolve through the URB
+// traffic of the probe window, and a counter that does not single one
+// device out refuses with a reason instead of guessing.
 func TestUsbPortPathByReader(t *testing.T) {
 	t.Parallel()
 	root := fakeSysfsUSBNamed(t, []fakeUSBDevice{
@@ -344,43 +350,44 @@ func TestUsbPortPathByReader(t *testing.T) {
 		{devpath: "3-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"03"}}, // no CCID interface
 		{devpath: "4-1", manufacturer: "Generic", product: "Mass Storage", ifaces: []string{"08"}},
 	})
-	port, reason := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 01 00 00", nil)
+	port, reason := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 01 00 00", nil, nil)
 	if port != "1-2" || reason != "" {
 		t.Errorf("usbPortPathByReader = %q, %q, want 1-2 and no reason", port, reason)
 	}
 	// The hotplug indices are stripped before matching.
-	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 07 00 00", nil); port != "1-2" {
+	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 07 00 00", nil, nil); port != "1-2" {
 		t.Errorf("usbPortPathByReader(hotplug variant) = %q, want 1-2", port)
 	}
 	// A parenthesized placeholder serial never blocks the match.
-	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U (0) 01 00 00", nil); port != "1-2" {
+	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U (0) 01 00 00", nil, nil); port != "1-2" {
 		t.Errorf("usbPortPathByReader(placeholder serial) = %q, want 1-2", port)
 	}
-	if port, reason := usbPortPathByReader(discardLogger(), root, "Cherry GmbH SmartTerminal XX44", nil); port != "" || reason == "" {
+	if port, reason := usbPortPathByReader(discardLogger(), root, "Cherry GmbH SmartTerminal XX44", nil, nil); port != "" || reason == "" {
 		t.Errorf("usbPortPathByReader(unknown model) = %q, %q, want empty and a reason", port, reason)
 	}
 	// A different CCID model resolves to its own port.
-	if port, reason := usbPortPathByReader(discardLogger(), root, "Yubico YubiKey CCID 01 00 00", nil); port != "2-1.4" || reason != "" {
+	if port, reason := usbPortPathByReader(discardLogger(), root, "Yubico YubiKey CCID 01 00 00", nil, nil); port != "2-1.4" || reason != "" {
 		t.Errorf("usbPortPathByReader(single yubikey) = %q, %q, want 2-1.4 and no reason", port, reason)
 	}
-	dup := fakeSysfsUSBNamed(t, []fakeUSBDevice{
-		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
-		{devpath: "2-1.4", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+	// Three identical units: the probe traffic singles the unit out.
+	trio := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
+		{devpath: "1-4", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
 	})
-	// Two identical devices with one daemon reader: the counts disagree,
-	// no truthful mapping exists, the scan refuses with a reason.
-	if port, reason := usbPortPathByReader(discardLogger(), dup, "ACS ACR122U 01 00 00",
-		[]string{"ACS ACR122U 01 00 00"}); port != "" || reason == "" {
-		t.Errorf("usbPortPathByReader(count mismatch) = %q, %q, want empty and a reason", port, reason)
+	before := usbUrbSnapshot(trio)
+	after := map[string]uint32{"1-1": 100, "1-2": 112, "1-4": 100} // the probe talked to 1-2
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, after); port != "1-2" || reason != "" {
+		t.Errorf("usbPortPathByReader(traffic winner) = %q, %q, want 1-2 and no reason", port, reason)
 	}
-	// Two identical devices, two daemon readers: the daemon order aligns
-	// with the sysfs order, each reader takes its own port.
-	peers := []string{"ACS ACR122U 00 00", "ACS ACR122U 01 00"}
-	if port, reason := usbPortPathByReader(discardLogger(), dup, "ACS ACR122U 00 00", peers); port != "1-2" || reason != "" {
-		t.Errorf("usbPortPathByReader(first of two) = %q, %q, want 1-2 and no reason", port, reason)
+	// Equal movement (or none) refuses instead of guessing.
+	flat := map[string]uint32{"1-1": 100, "1-2": 100, "1-4": 100}
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, flat); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(no movement) = %q, %q, want empty and a reason", port, reason)
 	}
-	if port, reason := usbPortPathByReader(discardLogger(), dup, "ACS ACR122U 01 00", peers); port != "2-1.4" || reason != "" {
-		t.Errorf("usbPortPathByReader(second of two) = %q, %q, want 2-1.4 and no reason", port, reason)
+	moved := map[string]uint32{"1-1": 100, "1-2": 103, "1-4": 103}
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, moved); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(equal movement) = %q, %q, want empty and a reason", port, reason)
 	}
 }
 
@@ -434,20 +441,56 @@ func TestWatchResolvesPortWithoutChannelID(t *testing.T) {
 	}
 }
 
-// TestWatchIdentifiesIdenticalReadersByPosition drives the full three
+// bumpUrbNum raises the urbnum file of the sysfs USB device in a tight
+// loop until stop closes, simulating the URBs the real driver
+// exchanges with the physical reader during the unit probe. The test
+// drives it only for the reader currently being probed, so the probe
+// window sees exactly one device moving, like on real hardware.
+func bumpUrbNum(t *testing.T, root, devpath string, stop <-chan struct{}) {
+	t.Helper()
+	file := filepath.Join(root, devpath, "urbnum")
+	go func() {
+		count := int(readSysNum(file))
+		if count == 0 {
+			count = 100
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			count += 4
+			// Atomic swap, the probe snapshots must never see a
+			// truncated counter.
+			tmp := file + ".tmp"
+			if err := os.WriteFile(tmp, []byte(strconv.Itoa(count)+"\n"), 0o644); err != nil {
+				return
+			}
+			if err := os.Rename(tmp, file); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// TestWatchIdentifiesIdenticalReadersByTraffic drives the full three
 // unit scenario through the watch pipeline: three identical readers
 // (same model, placeholder serial, driver serves no channel id) on
-// three USB ports. The daemon's reader order aligns with the sysfs USB
-// order, so every unit carries its own port and its own port anchored
-// reader tag, stable across daemon restarts and reboots as long as the
-// readers stay in their ports.
-func TestWatchIdentifiesIdenticalReadersByPosition(t *testing.T) {
+// three USB ports. The unit probe's own USB traffic singles the
+// physical device out through its sysfs urbnum counter, so every unit
+// carries the full USB port path of its own device and a port anchored
+// reader tag. Re-presenting a card reproduces the exact same port and
+// tag: the identity follows the physical port, not the daemon's
+// enumeration order, so service restarts, daemon restarts and reboots
+// cannot shuffle it.
+func TestWatchIdentifiesIdenticalReadersByTraffic(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
 	root := fakeSysfsUSBNamed(t, []fakeUSBDevice{
-		{devpath: "1-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
-		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
-		{devpath: "1-4", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+		{devpath: "1-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
+		{devpath: "1-4", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
 	})
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -460,43 +503,59 @@ func TestWatchIdentifiesIdenticalReadersByPosition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readers := []string{"ACS ACR122U 02 00", "ACS ACR122U 00 00", "ACS ACR122U 01 00"}
-	for i, reader := range readers {
-		fake.InsertCard(reader, mifareATR, []byte{0x04, 0x11, uint8(0x20 + i), 0x33})
-		fake.SetSerial(reader, "0") // placeholder, no usable serial
-		// No SetChannelID: the driver answers unsupported feature.
-	}
-	// The fake daemon, like pcscd, serves a deterministic reader order
-	// (slot order; the fake sorts by name), the sysfs candidates sort
-	// by devpath: the i-th reader of the model takes the i-th port.
-	want := map[string]string{
+	// The physical wiring under test: this reader sits in that port.
+	wiring := map[string]string{
 		"ACS ACR122U 00 00": "1-1",
 		"ACS ACR122U 01 00": "1-2",
 		"ACS ACR122U 02 00": "1-4",
 	}
-	got := make(map[string]string)
-	for range readers {
-		ev := receiveEvent(t, events, 3*time.Second)
+	// Present a card on every reader one after another, bumping the
+	// wired device's URB counter while the probe runs.
+	tags := make(map[string]string)
+	for i, reader := range []string{"ACS ACR122U 00 00", "ACS ACR122U 01 00", "ACS ACR122U 02 00"} {
+		fake.InsertCard(reader, mifareATR, []byte{0x04, 0x11, uint8(0x20 + i), 0x33})
+		fake.SetSerial(reader, "0") // placeholder, no usable serial
+		// No SetChannelID: the driver answers unsupported feature.
+		stop := make(chan struct{})
+		bumpUrbNum(t, root, wiring[reader], stop)
+		ev := receiveEvent(t, events, 5*time.Second)
+		close(stop)
 		if ev.Kind != KindInsert {
 			t.Fatalf("kind = %v, want insert", ev.Kind)
 		}
-		got[ev.Reader] = ev.ReaderPort
-		if ev.ReaderTag != ReaderTagWithUnit(ev.Reader, "", want[ev.Reader]) {
-			t.Errorf("reader %q tag = %q, want the port %q derived tag", ev.Reader, ev.ReaderTag, want[ev.Reader])
+		if ev.ReaderPort != wiring[reader] {
+			t.Errorf("reader %q port = %q, want %q resolved by the probe traffic", ev.Reader, ev.ReaderPort, wiring[reader])
+		}
+		if ev.ReaderTag != ReaderTagWithUnit(ev.Reader, "", wiring[reader]) {
+			t.Errorf("reader %q tag = %q, want the full usb path derived tag", ev.Reader, ev.ReaderTag)
+		}
+		tags[reader] = ev.ReaderTag
+	}
+	for a, tagA := range tags {
+		for b, tagB := range tags {
+			if a < b && tagA == tagB {
+				t.Errorf("readers %q and %q share one tag %q", a, b, tagA)
+			}
 		}
 	}
-	for reader, port := range want {
-		if got[reader] != port {
-			t.Errorf("reader %q port = %q, want %q", reader, got[reader], port)
-		}
+	// A re-presentation after a removal reproduces the exact same port
+	// and tag: the identity is anchored to the physical port.
+	reader := "ACS ACR122U 01 00"
+	fake.RemoveCard(reader)
+	if ev := receiveEvent(t, events, 5*time.Second); ev.Kind != KindRemove {
+		t.Fatalf("kind = %v, want remove", ev.Kind)
 	}
-	tags := make(map[string]bool)
-	for reader := range want {
-		tag := ReaderTagWithUnit(reader, "", want[reader])
-		if tags[tag] {
-			t.Errorf("two identical readers share one tag: %q", tag)
-		}
-		tags[tag] = true
+	fake.InsertCard(reader, mifareATR, []byte{0x04, 0x55, 0x66, 0x77})
+	stop := make(chan struct{})
+	bumpUrbNum(t, root, wiring[reader], stop)
+	ev := receiveEvent(t, events, 5*time.Second)
+	close(stop)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.ReaderPort != wiring[reader] || ev.ReaderTag != tags[reader] {
+		t.Errorf("re-presented reader got port %q tag %q, want %q and the reproduced tag %q",
+			ev.ReaderPort, ev.ReaderTag, wiring[reader], tags[reader])
 	}
 }
 

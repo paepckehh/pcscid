@@ -40,7 +40,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -67,6 +66,16 @@ const channelIDUSBType uint32 = 0x0020
 // to tell readers from every other USB device.
 const ccidInterfaceClass uint32 = 0x0B
 
+// urbWinnerMinDelta is the smallest URB counter delta that counts as
+// the unit's probe traffic, and the margin the runner up must stay
+// behind: the probe exchange (connect, two GetAttrib, disconnect)
+// submits a burst of URBs to exactly the probed device, an idle
+// identical unit moves its counter by at most a stray poll URB.
+const (
+	urbWinnerMinDelta = 2
+	urbWinnerMargin   = 2
+)
+
 // probeReaderUnit asks the driver for the per-unit identity of reader:
 // its hardware serial and, only when no usable serial exists and
 // useUSBPath allows it, its USB port path. Both need an open card
@@ -75,11 +84,24 @@ const ccidInterfaceClass uint32 = 0x0B
 // map to the empty strings, the caller then falls back to the model
 // level tag. With useUSBPath enabled the port resolution is two
 // staged: first the channel id through the driver, then the sysfs USB
-// tree scanned for the reader's CCID device by name. A port that
-// stays empty is reported as a qualified error naming every failed
+// tree scanned for the reader's CCID device by name, and with several
+// identical candidates the unit is singled out by its USB traffic —
+// the probe exchange itself moves the sysfs urbnum counter of exactly
+// the probed physical device, a snapshot taken before the connection
+// and one taken after the attribute reads identify it. That correlation
+// is exact and independent of the daemon's reader order, so the same
+// physical reader on the same port derives the same tag across
+// service restarts, daemon restarts and reboots. A port that stays
+// unresolved is reported as a qualified error naming every failed
 // step, because the operator asked for a per-unit identity and
 // silently losing it makes two identical readers collide on one tag.
-func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool, peers []string) (serial, port string) {
+func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool) (serial, port string) {
+	// The traffic baseline must precede the first URB of this probe,
+	// the card connection itself already talks to the device.
+	var before map[string]uint32
+	if useUSBPath {
+		before = usbUrbSnapshot(sysfsRoot)
+	}
 	card, err := openCard(cl, reader)
 	if err != nil {
 		lg.Debug("reader unit probe connect failed",
@@ -114,9 +136,9 @@ func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 		}
 		if port == "" {
 			var nameReason string
-			port, nameReason = usbPortPathByReader(lg, sysfsRoot, reader, peers)
+			port, nameReason = usbPortPathByReader(lg, sysfsRoot, reader, before, usbUrbSnapshot(sysfsRoot))
 			if port != "" {
-				lg.Debug("reader usb port resolved by sysfs device scan",
+				lg.Info("reader usb port resolved",
 					"reader", reader, "port", port)
 			} else {
 				reasons = append(reasons, nameReason)
@@ -261,18 +283,17 @@ func usbPortPath(lg *slog.Logger, root string, bus, dev uint32) (port, reason st
 // the device's identification strings and the device must carry a CCID
 // interface (bInterfaceClass 0x0B).
 //
-// Exactly one matching device identifies the port. N identical units
-// are resolved positionally: pcscd serves the model's readers in its
-// deterministic slot order (udev coldplug enumeration, stable for one
-// topology), and the candidates sorted by syspath carry that same
-// order, so aligning both by position maps every unit to its own
-// port. The alignment is guarded by the counts (it only applies when
-// pcscd lists exactly as many readers of the model as the sysfs tree
-// holds devices) and re-derived on every poll, so it follows daemon
-// restarts and reboots; the tags stay port anchored and stable as
-// long as the readers stay in their ports. A count mismatch cannot be
-// aligned truthfully and answers the empty port with that reason.
-func usbPortPathByReader(lg *slog.Logger, root, reader string, peers []string) (port, reason string) {
+// Exactly one matching device identifies the port directly. N matching
+// devices are N identical reader units: they are told apart by their
+// USB traffic, not by order — before and after hold the sysfs urbnum
+// counters of the probe window (see probeReaderUnit), and the device
+// whose counter moved is the probed unit. The correlation is exact and
+// independent of the daemon's reader order, so the same physical
+// reader on the same port keeps its tag across service restarts,
+// daemon restarts and reboots. When the counters do not single one
+// device out the scan refuses with a qualified reason, the reader then
+// keeps the stable model level tag instead of a shuffling guess.
+func usbPortPathByReader(lg *slog.Logger, root, reader string, before, after map[string]uint32) (port, reason string) {
 	if root == "" {
 		return "", "no sysfs root is configured to scan for the reader's USB device"
 	}
@@ -304,10 +325,10 @@ func usbPortPathByReader(lg *slog.Logger, root, reader string, peers []string) (
 		}
 		candidates = append(candidates, name)
 	}
-	switch {
-	case len(candidates) == 0:
+	switch len(candidates) {
+	case 0:
 		return "", "no CCID USB device in sysfs matches the reader name"
-	case len(candidates) == 1:
+	case 1:
 		devpath := readSysString(filepath.Join(root, candidates[0], "devpath"))
 		if devpath == "" {
 			return "", fmt.Sprintf("the USB device %s carries no devpath", candidates[0])
@@ -316,47 +337,62 @@ func usbPortPathByReader(lg *slog.Logger, root, reader string, peers []string) (
 			"reader", reader, "device", candidates[0], "port", devpath)
 		return devpath, ""
 	}
-	// N identical units without a channel id: align the daemon's reader
-	// order with the sysfs candidate order.
-	var sameModel []string
-	for _, peer := range peers {
-		if slices.Equal(readerNameTokens(peer), tokens) {
-			sameModel = append(sameModel, peer)
-		}
+	// N identical units without a channel id: single the probed one out
+	// by its USB traffic across the probe window.
+	winner, ok := usbUrbWinner(before, after, candidates)
+	if !ok {
+		return "", fmt.Sprintf("%d CCID USB devices match the reader name and the usb traffic did not single one out, the unit mapping is ambiguous without the channel id", len(candidates))
 	}
-	if len(sameModel) != len(candidates) {
-		return "", fmt.Sprintf("%d CCID USB devices match the reader name but pcscd lists %d readers of that model, the mapping is ambiguous without the channel id", len(candidates), len(sameModel))
-	}
-	sysfsSortedNames(root, candidates)
-	devpath := ""
-	for i, peer := range sameModel {
-		if peer == reader {
-			devpath = readSysString(filepath.Join(root, candidates[i], "devpath"))
-		}
-	}
+	devpath := readSysString(filepath.Join(root, winner, "devpath"))
 	if devpath == "" {
-		return "", fmt.Sprintf("reader %q is not part of the daemon's reader order", reader)
+		return "", fmt.Sprintf("the USB device %s carries no devpath", winner)
 	}
-	lg.Warn("positional usb port assignment",
-		"reader", reader, "port", devpath,
-		"units", len(sameModel),
-		"note", "the port follows the daemon's reader order aligned with the sysfs USB order; replug readers one at a time and re-verify the stations if scans seem swapped; the channel id would resolve each unit exactly")
+	lg.Info("usb port resolved by traffic correlation",
+		"reader", reader, "device", winner, "port", devpath,
+		"urb", after[winner]-before[winner])
 	return devpath, ""
 }
 
-// sysfsSortedNames sorts the sysfs device names in place the way udev
-// enumerates them: by the real syspath behind the bus directory
-// symlink, falling back to the entry name when the link cannot be
-// resolved.
-func sysfsSortedNames(root string, names []string) {
-	real := make([]string, len(names))
-	for i, name := range names {
-		real[i] = name
-		if path, err := filepath.EvalSymlinks(filepath.Join(root, name)); err == nil {
-			real[i] = path
+// usbUrbSnapshot reads the URB counter (sysfs urbnum) of every CCID USB
+// device in the tree. A nil map or unreadable root disables the
+// traffic correlation.
+func usbUrbSnapshot(root string) map[string]uint32 {
+	if root == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	ccid := usbCCIDDevices(root, entries)
+	counts := make(map[string]uint32, len(ccid))
+	for name := range ccid {
+		counts[name] = readSysNum(filepath.Join(root, name, "urbnum"))
+	}
+	return counts
+}
+
+// usbUrbWinner picks the candidate whose URB counter moved the most
+// between the two snapshots of the probe window: the probe exchange
+// submits a burst of URBs to exactly the probed device, idle identical
+// units stay put. The winner must clear a minimum delta and beat the
+// runner up by the margin, anything else is ambiguous and refuses.
+func usbUrbWinner(before, after map[string]uint32, candidates []string) (name string, ok bool) {
+	winner, winnerDelta, runnerUp := "", 0, 0
+	for _, candidate := range candidates {
+		delta := int(after[candidate]) - int(before[candidate])
+		switch {
+		case delta > winnerDelta:
+			runnerUp = winnerDelta
+			winner, winnerDelta = candidate, delta
+		case delta > runnerUp:
+			runnerUp = delta
 		}
 	}
-	sort.Slice(names, func(i, j int) bool { return real[i] < real[j] })
+	if winner == "" || winnerDelta < urbWinnerMinDelta || winnerDelta-runnerUp < urbWinnerMargin {
+		return "", false
+	}
+	return winner, true
 }
 
 // usbCCIDDevices maps the name of every sysfs USB device that carries

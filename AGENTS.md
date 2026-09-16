@@ -105,14 +105,17 @@ CCID device directly (bInterfaceClass 0x0B, USB manufacturer and
 product strings matching the pcscd reader name, which pcscd derives
 from the same vendor and product table). Exactly one matching device
 identifies the port. N identical units (same model, placeholder
-serial, no channel id) resolve positionally: the daemon serves its
-readers in its deterministic slot order (udev coldplug enumeration,
-stable for one hardware topology), the sysfs candidates sorted by
-syspath carry the same order, and aligning both by position maps
-every unit to its own port — guarded by a count match, re-derived on
-every poll, logged as a `positional usb port assignment` warning.
-A count mismatch cannot be aligned truthfully and answers the
-qualified error. Either way the port
+serial, no channel id) are told apart by their USB traffic: the unit
+probe snapshots the sysfs `urbnum` counter of every candidate before
+and after its own card connection and attribute reads — that exchange
+submits a burst of URBs to exactly the probed physical device, so
+the counter that moved identifies the unit, independent of the
+daemon's reader order (an order aligned mapping would shuffle the
+units on every restart). The correlation is exact and re-derived on
+every presentation, so the same physical reader on the same port
+keeps its full USB port path (devpath) and its tag across service
+restarts, daemon restarts and reboots. A counter that does not single
+one device out refuses with the qualified error. Either way the port
 travels into `ReaderTagWithUnit` as hash domain `pcscid/reader/v3` —
 stable per port across daemon restarts and reboots, but it changes
 when the reader moves to another port. With the option enabled a
