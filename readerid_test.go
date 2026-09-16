@@ -63,16 +63,16 @@ func TestUsbPortPath(t *testing.T) {
 		(uint64(1) << 32) | 0x22: "1-2",
 		(uint64(2) << 32) | 0x33: "2-1.4",
 	})
-	if got := usbPortPath(root, 1, 0x22); got != "1-2" {
+	if got := usbPortPath(discardLogger(), root, 1, 0x22); got != "1-2" {
 		t.Errorf("usbPortPath(bus 1 dev 0x22) = %q, want 1-2", got)
 	}
-	if got := usbPortPath(root, 2, 0x33); got != "2-1.4" {
+	if got := usbPortPath(discardLogger(), root, 2, 0x33); got != "2-1.4" {
 		t.Errorf("usbPortPath(bus 2 dev 0x33) = %q, want 2-1.4", got)
 	}
-	if got := usbPortPath(root, 9, 0x99); got != "" {
+	if got := usbPortPath(discardLogger(), root, 9, 0x99); got != "" {
 		t.Errorf("usbPortPath(unknown) = %q, want empty", got)
 	}
-	if got := usbPortPath("", 1, 0x22); got != "" {
+	if got := usbPortPath(discardLogger(), "", 1, 0x22); got != "" {
 		t.Errorf("usbPortPath(empty root) = %q, want empty", got)
 	}
 }

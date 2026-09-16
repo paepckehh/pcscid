@@ -299,6 +299,19 @@ func isHotplugIndex(s string) bool {
 // The channel is closed once ctx is cancelled.
 func Watch(ctx context.Context, opts *Options) (<-chan Event, error) {
 	lg, env := watchOptions(opts)
+	if env.socketPath == "" {
+		lg.Debug("watch configuration",
+			"socket", "default (/run/pcscd/pcscd.comm, /var/run/pcscd/pcscd.comm, PCSCLITE_CSOCK_NAME override)",
+			"sysfs_usb_root", env.sysfsRoot,
+			"usb_path_id", env.useUSBPath,
+			"machine_id", env.machine)
+	} else {
+		lg.Debug("watch configuration",
+			"socket", env.socketPath,
+			"sysfs_usb_root", env.sysfsRoot,
+			"usb_path_id", env.useUSBPath,
+			"machine_id", env.machine)
+	}
 	cl, err := pcsc.New(env.socketPath, lg)
 	if err != nil {
 		return nil, fmt.Errorf("pcscid: pcscd unavailable: %w", err)

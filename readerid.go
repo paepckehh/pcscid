@@ -71,23 +71,44 @@ func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 	}()
 
 	serial = readVendorSerial(card, lg, reader)
-	if serial != "" || !useUSBPath {
-		return serial, ""
+	if serial == "" {
+		if !useUSBPath {
+			lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
+		} else {
+			// No usable serial: anchor the unit to its physical USB port.
+			lg.Debug("reader usb port path fallback enabled",
+				"reader", reader, "sysfs", sysfsRoot)
+			if bus, dev, ok := readChannelID(card, lg, reader); ok {
+				port = usbPortPath(lg, sysfsRoot, bus, dev)
+				if port != "" {
+					lg.Debug("reader usb port resolved",
+						"reader", reader, "bus", bus, "device", dev, "port", port)
+				} else {
+					lg.Debug("reader usb port unresolved",
+						"reader", reader, "bus", bus, "device", dev)
+				}
+			}
+		}
 	}
-	// No usable serial: anchor the unit to its physical USB port.
-	bus, dev, ok := readChannelID(card, lg, reader)
-	if !ok {
-		return "", ""
+	// The identity outcome is reported at info level, so the USB
+	// anchoring is visible even without the debug trace.
+	lg.Info("reader unit identity",
+		"reader", reader, "serial", serial, "port", port, "tier", unitTier(serial, port))
+	return serial, port
+}
+
+// unitTier names the portability tier of the per-unit identity facts:
+// "serial" (one tag per unit, portable), "port" (one tag per USB
+// port, not portable) or "model" (no per-unit fact, name only).
+func unitTier(serial, port string) string {
+	switch {
+	case serial != "":
+		return "serial"
+	case port != "":
+		return "port"
+	default:
+		return "model"
 	}
-	port = usbPortPath(sysfsRoot, bus, dev)
-	if port != "" {
-		lg.Debug("reader usb port resolved",
-			"reader", reader, "bus", bus, "device", dev, "port", port)
-	} else {
-		lg.Debug("reader usb port unresolved",
-			"reader", reader, "bus", bus, "device", dev)
-	}
-	return "", port
 }
 
 // readVendorSerial asks for the reader hardware serial and filters the
@@ -149,16 +170,24 @@ func readChannelID(card *pcsc.Card, lg *slog.Logger, reader string) (bus, dev ui
 // kernel physical port path (sysfs devpath, for example "2-1.3").
 // The entries of a sysfs bus directory are symlinks into
 // /sys/devices, so every candidate is stat-ed, not classified by its
-// directory entry type. It returns the empty string when the device
-// cannot be found, sysfs is unreadable or root is empty.
-func usbPortPath(root string, bus, dev uint32) string {
+// directory entry type. Every step of the scan is logged to lg, so
+// an unresolved port is diagnosable from the trace. It returns the
+// empty string when the device cannot be found, sysfs is unreadable
+// or root is empty.
+func usbPortPath(lg *slog.Logger, root string, bus, dev uint32) string {
 	if root == "" {
+		lg.Debug("usb port path scan skipped, no sysfs root",
+			"bus", bus, "device", dev)
 		return ""
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
+		lg.Debug("usb port path scan failed",
+			"sysfs", root, "bus", bus, "device", dev, "error", err)
 		return ""
 	}
+	lg.Debug("usb port path scan",
+		"sysfs", root, "entries", len(entries), "bus", bus, "device", dev)
 	for _, entry := range entries {
 		dir := filepath.Join(root, entry.Name())
 		info, err := os.Stat(dir)
@@ -171,10 +200,14 @@ func usbPortPath(root string, bus, dev uint32) string {
 		}
 		raw, err := os.ReadFile(filepath.Join(dir, "devpath"))
 		if err != nil {
+			lg.Debug("usb port path devpath unreadable",
+				"sysfs", dir, "error", err)
 			return ""
 		}
 		return strings.TrimSpace(string(raw))
 	}
+	lg.Debug("usb port path no matching usb device",
+		"sysfs", root, "bus", bus, "device", dev)
 	return ""
 }
 
