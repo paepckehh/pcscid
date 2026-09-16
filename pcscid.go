@@ -430,6 +430,13 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 			return err
 		}
 		lg.Debug("reader states", "readers", len(states))
+		// The daemon serves the readers in its deterministic slot order;
+		// the positional port fallback aligns that order with the sysfs
+		// USB order, so every probe needs the full ordered list.
+		peers := make([]string, len(states))
+		for i, st := range states {
+			peers[i] = st.Reader
+		}
 		seen := make(map[string]bool, len(states))
 		for _, st := range states {
 			seen[st.Reader] = true
@@ -441,7 +448,7 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 					// The unit attributes need an open card
 					// connection, so the individual reader identity is
 					// only readable now, while the card is there.
-					serial, port := probeReaderUnit(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath)
+					serial, port := probeReaderUnit(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, peers)
 					card := identify(cl, lg, st, serial, port, env.machine)
 					tag := ReaderTagWithMachine(st.Reader, serial, port, env.machine)
 					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderTag: tag, ReaderSerial: serial, ReaderPort: port}) {

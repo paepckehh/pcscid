@@ -104,8 +104,15 @@ serves no channel id, the sysfs USB tree is scanned for the reader's
 CCID device directly (bInterfaceClass 0x0B, USB manufacturer and
 product strings matching the pcscd reader name, which pcscd derives
 from the same vendor and product table). Exactly one matching device
-identifies the port, two identical reader models are
-distinguishable through the channel id only. Either way the port
+identifies the port. N identical units (same model, placeholder
+serial, no channel id) resolve positionally: the daemon serves its
+readers in its deterministic slot order (udev coldplug enumeration,
+stable for one hardware topology), the sysfs candidates sorted by
+syspath carry the same order, and aligning both by position maps
+every unit to its own port — guarded by a count match, re-derived on
+every poll, logged as a `positional usb port assignment` warning.
+A count mismatch cannot be aligned truthfully and answers the
+qualified error. Either way the port
 travels into `ReaderTagWithUnit` as hash domain `pcscid/reader/v3` —
 stable per port across daemon restarts and reboots, but it changes
 when the reader moves to another port. With the option enabled a

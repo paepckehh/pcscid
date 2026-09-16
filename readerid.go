@@ -40,6 +40,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -78,7 +79,7 @@ const ccidInterfaceClass uint32 = 0x0B
 // stays empty is reported as a qualified error naming every failed
 // step, because the operator asked for a per-unit identity and
 // silently losing it makes two identical readers collide on one tag.
-func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool) (serial, port string) {
+func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool, peers []string) (serial, port string) {
 	card, err := openCard(cl, reader)
 	if err != nil {
 		lg.Debug("reader unit probe connect failed",
@@ -113,7 +114,7 @@ func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 		}
 		if port == "" {
 			var nameReason string
-			port, nameReason = usbPortPathByReader(lg, sysfsRoot, reader)
+			port, nameReason = usbPortPathByReader(lg, sysfsRoot, reader, peers)
 			if port != "" {
 				lg.Debug("reader usb port resolved by sysfs device scan",
 					"reader", reader, "port", port)
@@ -258,13 +259,20 @@ func usbPortPath(lg *slog.Logger, root string, bus, dev uint32) (port, reason st
 // vendor and product table, which mirrors the USB manufacturer and
 // product strings, so the normalized reader name must appear inside
 // the device's identification strings and the device must carry a CCID
-// interface (bInterfaceClass 0x0B). Exactly one matching device
-// identifies the port. Two matching devices are two identical reader
-// models: without the channel id no software fact can tell them
-// apart, the scan answers the empty port with that reason. The
-// returned devpath is stable across daemon restarts and reboots as
-// long as the reader stays in its port.
-func usbPortPathByReader(lg *slog.Logger, root, reader string) (port, reason string) {
+// interface (bInterfaceClass 0x0B).
+//
+// Exactly one matching device identifies the port. N identical units
+// are resolved positionally: pcscd serves the model's readers in its
+// deterministic slot order (udev coldplug enumeration, stable for one
+// topology), and the candidates sorted by syspath carry that same
+// order, so aligning both by position maps every unit to its own
+// port. The alignment is guarded by the counts (it only applies when
+// pcscd lists exactly as many readers of the model as the sysfs tree
+// holds devices) and re-derived on every poll, so it follows daemon
+// restarts and reboots; the tags stay port anchored and stable as
+// long as the readers stay in their ports. A count mismatch cannot be
+// aligned truthfully and answers the empty port with that reason.
+func usbPortPathByReader(lg *slog.Logger, root, reader string, peers []string) (port, reason string) {
 	if root == "" {
 		return "", "no sysfs root is configured to scan for the reader's USB device"
 	}
@@ -279,7 +287,7 @@ func usbPortPathByReader(lg *slog.Logger, root, reader string) (port, reason str
 	ccid := usbCCIDDevices(root, entries)
 	lg.Debug("usb port path name scan",
 		"sysfs", root, "reader", reader, "ccid_devices", len(ccid))
-	var matches []string
+	var candidates []string
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.Contains(name, ":") || !ccid[name] {
@@ -294,22 +302,61 @@ func usbPortPathByReader(lg *slog.Logger, root, reader string) (port, reason str
 		if !tokensIn(device, tokens) {
 			continue
 		}
-		matches = append(matches, name)
+		candidates = append(candidates, name)
 	}
-	switch len(matches) {
-	case 0:
+	switch {
+	case len(candidates) == 0:
 		return "", "no CCID USB device in sysfs matches the reader name"
-	case 1:
-		devpath := readSysString(filepath.Join(root, matches[0], "devpath"))
+	case len(candidates) == 1:
+		devpath := readSysString(filepath.Join(root, candidates[0], "devpath"))
 		if devpath == "" {
-			return "", fmt.Sprintf("the USB device %s carries no devpath", matches[0])
+			return "", fmt.Sprintf("the USB device %s carries no devpath", candidates[0])
 		}
 		lg.Debug("usb port path name scan matched",
-			"reader", reader, "device", matches[0], "port", devpath)
+			"reader", reader, "device", candidates[0], "port", devpath)
 		return devpath, ""
-	default:
-		return "", fmt.Sprintf("%d identical CCID USB devices match the reader name, the channel id would be required to tell them apart", len(matches))
 	}
+	// N identical units without a channel id: align the daemon's reader
+	// order with the sysfs candidate order.
+	var sameModel []string
+	for _, peer := range peers {
+		if slices.Equal(readerNameTokens(peer), tokens) {
+			sameModel = append(sameModel, peer)
+		}
+	}
+	if len(sameModel) != len(candidates) {
+		return "", fmt.Sprintf("%d CCID USB devices match the reader name but pcscd lists %d readers of that model, the mapping is ambiguous without the channel id", len(candidates), len(sameModel))
+	}
+	sysfsSortedNames(root, candidates)
+	devpath := ""
+	for i, peer := range sameModel {
+		if peer == reader {
+			devpath = readSysString(filepath.Join(root, candidates[i], "devpath"))
+		}
+	}
+	if devpath == "" {
+		return "", fmt.Sprintf("reader %q is not part of the daemon's reader order", reader)
+	}
+	lg.Warn("positional usb port assignment",
+		"reader", reader, "port", devpath,
+		"units", len(sameModel),
+		"note", "the port follows the daemon's reader order aligned with the sysfs USB order; replug readers one at a time and re-verify the stations if scans seem swapped; the channel id would resolve each unit exactly")
+	return devpath, ""
+}
+
+// sysfsSortedNames sorts the sysfs device names in place the way udev
+// enumerates them: by the real syspath behind the bus directory
+// symlink, falling back to the entry name when the link cannot be
+// resolved.
+func sysfsSortedNames(root string, names []string) {
+	real := make([]string, len(names))
+	for i, name := range names {
+		real[i] = name
+		if path, err := filepath.EvalSymlinks(filepath.Join(root, name)); err == nil {
+			real[i] = path
+		}
+	}
+	sort.Slice(names, func(i, j int) bool { return real[i] < real[j] })
 }
 
 // usbCCIDDevices maps the name of every sysfs USB device that carries
