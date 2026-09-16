@@ -1,9 +1,13 @@
 package pcscid
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,24 +60,24 @@ func itoa(n uint32) string {
 // TestUsbPortPath pins the sysfs resolution: a bus/device address maps
 // to the kernel physical port path of the device directory, through the
 // symlinks a real sysfs bus directory carries, and unknown addresses and
-// an empty root answer the empty string.
+// an empty root answer the empty port plus a qualified reason.
 func TestUsbPortPath(t *testing.T) {
 	t.Parallel()
 	root := fakeSysfsUSB(t, map[uint64]string{
 		(uint64(1) << 32) | 0x22: "1-2",
 		(uint64(2) << 32) | 0x33: "2-1.4",
 	})
-	if got := usbPortPath(discardLogger(), root, 1, 0x22); got != "1-2" {
-		t.Errorf("usbPortPath(bus 1 dev 0x22) = %q, want 1-2", got)
+	if port, reason := usbPortPath(discardLogger(), root, 1, 0x22); port != "1-2" || reason != "" {
+		t.Errorf("usbPortPath(bus 1 dev 0x22) = %q, %q, want 1-2 and no reason", port, reason)
 	}
-	if got := usbPortPath(discardLogger(), root, 2, 0x33); got != "2-1.4" {
-		t.Errorf("usbPortPath(bus 2 dev 0x33) = %q, want 2-1.4", got)
+	if port, reason := usbPortPath(discardLogger(), root, 2, 0x33); port != "2-1.4" || reason != "" {
+		t.Errorf("usbPortPath(bus 2 dev 0x33) = %q, %q, want 2-1.4 and no reason", port, reason)
 	}
-	if got := usbPortPath(discardLogger(), root, 9, 0x99); got != "" {
-		t.Errorf("usbPortPath(unknown) = %q, want empty", got)
+	if port, reason := usbPortPath(discardLogger(), root, 9, 0x99); port != "" || reason == "" {
+		t.Errorf("usbPortPath(unknown) = %q, %q, want empty and a reason", port, reason)
 	}
-	if got := usbPortPath(discardLogger(), "", 1, 0x22); got != "" {
-		t.Errorf("usbPortPath(empty root) = %q, want empty", got)
+	if port, reason := usbPortPath(discardLogger(), "", 1, 0x22); port != "" || reason == "" {
+		t.Errorf("usbPortPath(empty root) = %q, %q, want empty and a reason", port, reason)
 	}
 }
 
@@ -112,9 +116,9 @@ func TestReadChannelID(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { card.Disconnect(pcsc.LeaveCard) })
-	bus, dev, ok := readChannelID(card, discardLogger(), "R")
-	if !ok || bus != 1 || dev != 0x22 {
-		t.Errorf("readChannelID = bus %d dev %d ok %v, want bus 1 dev 0x22", bus, dev, ok)
+	bus, dev, reason := readChannelID(card, discardLogger(), "R")
+	if reason != "" || bus != 1 || dev != 0x22 {
+		t.Errorf("readChannelID = bus %d dev %d reason %q, want bus 1 dev 0x22 and no reason", bus, dev, reason)
 	}
 }
 
@@ -269,6 +273,197 @@ func TestWatchUSBPathIDDisabledByDefault(t *testing.T) {
 	}
 	if ev.ReaderTag != ReaderTag(ev.Reader) {
 		t.Errorf("reader tag = %q, want the model tag %q", ev.ReaderTag, ReaderTag(ev.Reader))
+	}
+}
+
+// fakeUSBDevice describes one device of a fake sysfs USB tree for the
+// name based port resolution: the identification strings pcscd's
+// reader names are built from, and the USB interface classes of the
+// device.
+type fakeUSBDevice struct {
+	devpath      string
+	manufacturer string
+	product      string
+	ifaces       []string // bInterfaceClass values, "0b" is CCID
+}
+
+// fakeSysfsUSBNamed writes a minimal sysfs USB device tree carrying
+// the manufacturer and product strings and the interface class files
+// the name based port resolution scans.
+func fakeSysfsUSBNamed(t *testing.T, devices []fakeUSBDevice) string {
+	t.Helper()
+	root := t.TempDir()
+	devicesRoot := filepath.Join(root, "devices")
+	for i, dev := range devices {
+		dir := filepath.Join(devicesRoot, dev.devpath)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{
+			"busnum":       itoa(uint32(i + 1)),
+			"devnum":       "1",
+			"devpath":      dev.devpath,
+			"manufacturer": dev.manufacturer,
+			"product":      dev.product,
+		}
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for j, class := range dev.ifaces {
+			ifDir := filepath.Join(devicesRoot, fmt.Sprintf("%s:1.%d", dev.devpath, j))
+			if err := os.MkdirAll(ifDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ifDir, "bInterfaceClass"), []byte(class+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(ifDir, filepath.Join(root, fmt.Sprintf("%s:1.%d", dev.devpath, j))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(dir, filepath.Join(root, dev.devpath)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestUsbPortPathByReader pins the name based fallback: a CCID device
+// whose manufacturer and product strings carry the reader name is the
+// reader, its devpath is the port. Non CCID devices and CCID devices of
+// another model never match, and two identical CCID devices cannot be
+// told apart without the channel id and answer a qualified reason.
+func TestUsbPortPathByReader(t *testing.T) {
+	t.Parallel()
+	root := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+		{devpath: "2-1.4", manufacturer: "Yubico", product: "YubiKey CCID", ifaces: []string{"0b"}},
+		{devpath: "3-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"03"}}, // no CCID interface
+		{devpath: "4-1", manufacturer: "Generic", product: "Mass Storage", ifaces: []string{"08"}},
+	})
+	port, reason := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 01 00 00")
+	if port != "1-2" || reason != "" {
+		t.Errorf("usbPortPathByReader = %q, %q, want 1-2 and no reason", port, reason)
+	}
+	// The hotplug indices are stripped before matching.
+	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 07 00 00"); port != "1-2" {
+		t.Errorf("usbPortPathByReader(hotplug variant) = %q, want 1-2", port)
+	}
+	// A parenthesized placeholder serial never blocks the match.
+	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U (0) 01 00 00"); port != "1-2" {
+		t.Errorf("usbPortPathByReader(placeholder serial) = %q, want 1-2", port)
+	}
+	if port, reason := usbPortPathByReader(discardLogger(), root, "Cherry GmbH SmartTerminal XX44"); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(unknown model) = %q, %q, want empty and a reason", port, reason)
+	}
+	// Two identical CCID devices are indistinguishable without the channel id.
+	// A different CCID model resolves to its own port.
+	if port, reason := usbPortPathByReader(discardLogger(), root, "Yubico YubiKey CCID 01 00 00"); port != "2-1.4" || reason != "" {
+		t.Errorf("usbPortPathByReader(single yubikey) = %q, %q, want 2-1.4 and no reason", port, reason)
+	}
+	dup := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+		{devpath: "2-1.4", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+	})
+	if port, reason := usbPortPathByReader(discardLogger(), dup, "ACS ACR122U 01 00 00"); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(two identical units) = %q, %q, want empty and a reason", port, reason)
+	}
+}
+
+// TestReaderNameTokens pins the token extraction: hotplug indices,
+// parenthesized serial suffixes and bare placeholder zeros never
+// become match tokens.
+func TestReaderNameTokens(t *testing.T) {
+	t.Parallel()
+	got := strings.Join(readerNameTokens("ACS ACR122U 01 00 00 (0)"), " ")
+	if want := "ACS ACR122U"; got != want {
+		t.Errorf("readerNameTokens = %q, want %q", got, want)
+	}
+	if len(readerNameTokens("00 00")) != 0 {
+		t.Error("a name of hotplug digits only must yield no tokens")
+	}
+}
+
+// TestWatchResolvesPortWithoutChannelID drives the fallback through
+// the whole watch pipeline: the driver serves neither serial nor
+// channel id, the sysfs device scan identifies the reader's port by
+// its name, the event carries the port derived reader tag.
+func TestWatchResolvesPortWithoutChannelID(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	root := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	events, err := Watch(ctx, &Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root,
+		USBPathID:    true,
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	fake.SetSerial("ACS ACR122U 01 00 00", "0") // placeholder, no usable serial
+	// No SetChannelID: the driver answers unsupported feature.
+	ev := receiveEvent(t, events, 3*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.ReaderPort != "1-2" {
+		t.Errorf("reader port = %q, want 1-2 resolved by the sysfs device scan", ev.ReaderPort)
+	}
+	if ev.ReaderTag != ReaderTagWithUnit(ev.Reader, "", "1-2") {
+		t.Errorf("reader tag = %q, want the port derived tag", ev.ReaderTag)
+	}
+}
+
+// TestWatchReportsUnresolvedPort pins the qualified error: with
+// USBPathID enabled and neither the channel id nor the sysfs device
+// scan resolving a port, the probe logs an error naming the reasons
+// instead of swallowing the empty port silently.
+func TestWatchReportsUnresolvedPort(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	events, err := Watch(ctx, &Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: t.TempDir(), // empty tree, nothing matches
+		USBPathID:    true,
+		Logger:       logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	fake.SetSerial("ACS ACR122U 01 00 00", "0")
+	ev := receiveEvent(t, events, 3*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.ReaderPort != "" {
+		t.Errorf("reader port = %q, want empty", ev.ReaderPort)
+	}
+	if ev.ReaderTag != ReaderTag(ev.Reader) {
+		t.Errorf("reader tag = %q, want the model tag fallback", ev.ReaderTag)
+	}
+	out := logs.String()
+	for _, want := range []string{
+		"reader usb port identity unresolved",
+		"reason=",
+		"the driver serves no channel id",
+		"no CCID USB device in sysfs matches the reader name",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("error report misses %q, got:\n%s", want, out)
+		}
 	}
 }
 

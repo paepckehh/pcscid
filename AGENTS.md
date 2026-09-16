@@ -94,15 +94,25 @@ tool writes it, the ACR122U escape command set has no NVRAM store
 too small and RF-behavior-changing to serve as an ID). Such serial
 less readers are anchored by their physical USB port instead, but
 only with the opt-in `PCSCID_USB_PATH_ID` / `Options.USBPathID`,
-because the port path is not portable:
-`SCARD_ATTR_CHANNEL_ID` (0x0110) answers the CCID packing
-`0x0020<<16 | bus<<8 | device`, resolved through sysfs
-(`/sys/bus/usb/devices`, busnum/devnum/devpath files, pure Go — the
-bus directory entries are symlinks, the resolver stats through them)
-to the kernel port path (devpath, `2-1.3`), which `ReaderTagWithUnit`
-mixes in as hash domain `pcscid/reader/v3` — stable per port across
-daemon restarts and reboots, but it changes when the reader moves
-to another port. `MachineID()` reads the network stack through
+because the port path is not portable. The port resolves in two
+stages, both pure Go sysfs reads: `SCARD_ATTR_CHANNEL_ID` (0x0110)
+answers the CCID packing `0x0020<<16 | bus<<8 | device`, resolved
+through sysfs (`/sys/bus/usb/devices`, busnum/devnum/devpath files —
+the bus directory entries are symlinks, the resolver stats through
+them) to the kernel port path (devpath, `2-1.3`); when the driver
+serves no channel id, the sysfs USB tree is scanned for the reader's
+CCID device directly (bInterfaceClass 0x0B, USB manufacturer and
+product strings matching the pcscd reader name, which pcscd derives
+from the same vendor and product table). Exactly one matching device
+identifies the port, two identical reader models are
+distinguishable through the channel id only. Either way the port
+travels into `ReaderTagWithUnit` as hash domain `pcscid/reader/v3` —
+stable per port across daemon restarts and reboots, but it changes
+when the reader moves to another port. With the option enabled a
+port that stays unresolved is reported as a qualified error naming
+every failed step (driver attribute, sysfs resolution), the reader
+then keeps the model level tag, which two identical units share.
+`MachineID()` reads the network stack through
 sysfs (`/sys/class/net`) for the stable hardware MAC addresses of
 the physical ethernet ports (type ethernet, backing device symlink,
 no phy80211, non zero MAC: wifi, lo, bridges, bonds, vlans and veth

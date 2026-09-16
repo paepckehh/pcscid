@@ -17,6 +17,17 @@
 //     (Options.USBPathID, PCSCID_USB_PATH_ID in the sample app) when
 //     no usable serial exists.
 //
+// When the driver serves neither usable serial nor channel id, the
+// sysfs USB tree is scanned for the reader's device directly: the USB
+// manufacturer and product strings must match the pcscd reader name
+// (pcscd derives that name from the same vendor and product strings)
+// and the device must carry a CCID interface. Exactly one matching
+// device identifies the port, two identical models cannot be told
+// apart without the channel id. With USBPathID enabled an unresolved
+// port is reported as a qualified error, not swallowed silently: the
+// reader then keeps the model level tag, which two identical units
+// share.
+//
 // MachineID (readerid.go bottom) is the machine level identity, the
 // stable hardware MAC addresses of the physical ethernet ports, mixed
 // into the reader tag when enabled (Options.MACID, PCSCID_MAC_ID in
@@ -50,18 +61,33 @@ const defaultSysfsNet = "/sys/class/net"
 // not resolve to a USB port path.
 const channelIDUSBType uint32 = 0x0020
 
+// ccidInterfaceClass is the USB interface class of a smart card reader
+// (CCID, bInterfaceClass 0x0B), the marker the sysfs device scan uses
+// to tell readers from every other USB device.
+const ccidInterfaceClass uint32 = 0x0B
+
 // probeReaderUnit asks the driver for the per-unit identity of reader:
 // its hardware serial and, only when no usable serial exists and
 // useUSBPath allows it, its USB port path. Both need an open card
 // connection, they are probed only while a card is presented. Failures
 // are best effort, an unusable serial and an unresolvable channel id
 // map to the empty strings, the caller then falls back to the model
-// level tag.
+// level tag. With useUSBPath enabled the port resolution is two
+// staged: first the channel id through the driver, then the sysfs USB
+// tree scanned for the reader's CCID device by name. A port that
+// stays empty is reported as a qualified error naming every failed
+// step, because the operator asked for a per-unit identity and
+// silently losing it makes two identical readers collide on one tag.
 func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool) (serial, port string) {
 	card, err := openCard(cl, reader)
 	if err != nil {
 		lg.Debug("reader unit probe connect failed",
 			"reader", reader, "error", err)
+		if useUSBPath {
+			lg.Error("reader unit identity unreadable, the card connection failed (PCSCID_USB_PATH_ID=1)",
+				"reader", reader, "error", err,
+				"consequence", "the reader keeps the model level tag, identical units share one tag")
+		}
 		return "", ""
 	}
 	defer func() {
@@ -71,24 +97,37 @@ func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 	}()
 
 	serial = readVendorSerial(card, lg, reader)
-	if serial == "" {
-		if !useUSBPath {
-			lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
+	if serial == "" && useUSBPath {
+		var reasons []string
+		if bus, dev, reason := readChannelID(card, lg, reader); reason == "" {
+			var portReason string
+			port, portReason = usbPortPath(lg, sysfsRoot, bus, dev)
+			if port != "" {
+				lg.Debug("reader usb port resolved by channel id",
+					"reader", reader, "bus", bus, "device", dev, "port", port)
+			} else {
+				reasons = append(reasons, portReason)
+			}
 		} else {
-			// No usable serial: anchor the unit to its physical USB port.
-			lg.Debug("reader usb port path fallback enabled",
-				"reader", reader, "sysfs", sysfsRoot)
-			if bus, dev, ok := readChannelID(card, lg, reader); ok {
-				port = usbPortPath(lg, sysfsRoot, bus, dev)
-				if port != "" {
-					lg.Debug("reader usb port resolved",
-						"reader", reader, "bus", bus, "device", dev, "port", port)
-				} else {
-					lg.Debug("reader usb port unresolved",
-						"reader", reader, "bus", bus, "device", dev)
-				}
+			reasons = append(reasons, reason)
+		}
+		if port == "" {
+			var nameReason string
+			port, nameReason = usbPortPathByReader(lg, sysfsRoot, reader)
+			if port != "" {
+				lg.Debug("reader usb port resolved by sysfs device scan",
+					"reader", reader, "port", port)
+			} else {
+				reasons = append(reasons, nameReason)
+				lg.Error("reader usb port identity unresolved (PCSCID_USB_PATH_ID=1)",
+					"reader", reader,
+					"reason", strings.Join(reasons, "; "),
+					"sysfs", sysfsRoot,
+					"consequence", "the reader keeps the model level tag, identical units share one tag")
 			}
 		}
+	} else if serial == "" {
+		lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
 	}
 	// The identity outcome is reported at info level, so the USB
 	// anchoring is visible even without the debug trace.
@@ -144,26 +183,28 @@ func isPlaceholderSerial(serial string) bool {
 }
 
 // readChannelID asks for the USB channel id of the reader and unpacks
-// the CCID packing 0x0020<<16 | bus<<8 | device.
-func readChannelID(card *pcsc.Card, lg *slog.Logger, reader string) (bus, dev uint32, ok bool) {
+// the CCID packing 0x0020<<16 | bus<<8 | device. An empty reason
+// reports success, a non empty one names what failed, for the error
+// report of an unresolved port identity.
+func readChannelID(card *pcsc.Card, lg *slog.Logger, reader string) (bus, dev uint32, reason string) {
 	attr, err := card.GetAttrib(pcsc.AttrChannelID)
 	if err != nil {
 		lg.Debug("reader channel id unavailable",
 			"reader", reader, "error", err)
-		return 0, 0, false
+		return 0, 0, fmt.Sprintf("the driver serves no channel id: %v", err)
 	}
 	if len(attr) != 4 {
 		lg.Debug("reader channel id malformed",
 			"reader", reader, "attr", fmt.Sprintf("% X", attr))
-		return 0, 0, false
+		return 0, 0, fmt.Sprintf("the channel id answer is malformed: %d bytes", len(attr))
 	}
 	id := uint32(attr[0]) | uint32(attr[1])<<8 | uint32(attr[2])<<16 | uint32(attr[3])<<24
 	if id>>16 != channelIDUSBType {
 		lg.Debug("reader channel is not usb, no port path",
 			"reader", reader, "channel", fmt.Sprintf("0x%08X", id))
-		return 0, 0, false
+		return 0, 0, fmt.Sprintf("the reader channel is not USB: 0x%08X", id)
 	}
-	return (id >> 8) & 0xFF, id & 0xFF, true
+	return (id >> 8) & 0xFF, id & 0xFF, ""
 }
 
 // usbPortPath resolves the USB bus/device address of a reader to the
@@ -172,19 +213,19 @@ func readChannelID(card *pcsc.Card, lg *slog.Logger, reader string) (bus, dev ui
 // /sys/devices, so every candidate is stat-ed, not classified by its
 // directory entry type. Every step of the scan is logged to lg, so
 // an unresolved port is diagnosable from the trace. It returns the
-// empty string when the device cannot be found, sysfs is unreadable
-// or root is empty.
-func usbPortPath(lg *slog.Logger, root string, bus, dev uint32) string {
+// empty port and a reason naming the failure when the device cannot
+// be found, sysfs is unreadable or root is empty.
+func usbPortPath(lg *slog.Logger, root string, bus, dev uint32) (port, reason string) {
 	if root == "" {
 		lg.Debug("usb port path scan skipped, no sysfs root",
 			"bus", bus, "device", dev)
-		return ""
+		return "", "no sysfs root is configured"
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		lg.Debug("usb port path scan failed",
 			"sysfs", root, "bus", bus, "device", dev, "error", err)
-		return ""
+		return "", fmt.Sprintf("the sysfs USB tree %s is unreadable: %v", root, err)
 	}
 	lg.Debug("usb port path scan",
 		"sysfs", root, "entries", len(entries), "bus", bus, "device", dev)
@@ -202,13 +243,150 @@ func usbPortPath(lg *slog.Logger, root string, bus, dev uint32) string {
 		if err != nil {
 			lg.Debug("usb port path devpath unreadable",
 				"sysfs", dir, "error", err)
-			return ""
+			return "", fmt.Sprintf("the USB device for bus %d device %d carries an unreadable devpath: %v", bus, dev, err)
 		}
-		return strings.TrimSpace(string(raw))
+		return strings.TrimSpace(string(raw)), ""
 	}
 	lg.Debug("usb port path no matching usb device",
 		"sysfs", root, "bus", bus, "device", dev)
-	return ""
+	return "", fmt.Sprintf("no USB device with bus %d device %d exists in %s", bus, dev, root)
+}
+
+// usbPortPathByReader resolves a reader to its kernel physical USB port
+// path without the channel id, by scanning the sysfs USB tree for the
+// reader's device: pcscd derives the reader name from the driver's
+// vendor and product table, which mirrors the USB manufacturer and
+// product strings, so the normalized reader name must appear inside
+// the device's identification strings and the device must carry a CCID
+// interface (bInterfaceClass 0x0B). Exactly one matching device
+// identifies the port. Two matching devices are two identical reader
+// models: without the channel id no software fact can tell them
+// apart, the scan answers the empty port with that reason. The
+// returned devpath is stable across daemon restarts and reboots as
+// long as the reader stays in its port.
+func usbPortPathByReader(lg *slog.Logger, root, reader string) (port, reason string) {
+	if root == "" {
+		return "", "no sysfs root is configured to scan for the reader's USB device"
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", fmt.Sprintf("the sysfs USB tree %s is unreadable: %v", root, err)
+	}
+	tokens := readerNameTokens(reader)
+	if len(tokens) == 0 {
+		return "", "the reader name carries no tokens to match a USB device against"
+	}
+	ccid := usbCCIDDevices(root, entries)
+	lg.Debug("usb port path name scan",
+		"sysfs", root, "reader", reader, "ccid_devices", len(ccid))
+	var matches []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.Contains(name, ":") || !ccid[name] {
+			continue // interface entry of a device, or not a CCID reader
+		}
+		dir := filepath.Join(root, name)
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		device := strings.ToUpper(readSysString(filepath.Join(dir, "manufacturer")) + " " + readSysString(filepath.Join(dir, "product")))
+		if !tokensIn(device, tokens) {
+			continue
+		}
+		matches = append(matches, name)
+	}
+	switch len(matches) {
+	case 0:
+		return "", "no CCID USB device in sysfs matches the reader name"
+	case 1:
+		devpath := readSysString(filepath.Join(root, matches[0], "devpath"))
+		if devpath == "" {
+			return "", fmt.Sprintf("the USB device %s carries no devpath", matches[0])
+		}
+		lg.Debug("usb port path name scan matched",
+			"reader", reader, "device", matches[0], "port", devpath)
+		return devpath, ""
+	default:
+		return "", fmt.Sprintf("%d identical CCID USB devices match the reader name, the channel id would be required to tell them apart", len(matches))
+	}
+}
+
+// usbCCIDDevices maps the name of every sysfs USB device that carries
+// a CCID interface (bInterfaceClass 0x0B, the smart card reader class)
+// to true. The interface entries of a sysfs bus directory are named
+// <device>:<config>.<interface>, the device name is the part before
+// the first colon.
+func usbCCIDDevices(root string, entries []os.DirEntry) map[string]bool {
+	ccid := make(map[string]bool)
+	for _, entry := range entries {
+		name := entry.Name()
+		if i := strings.IndexByte(name, ':'); i > 0 {
+			if readSysHex(filepath.Join(root, name, "bInterfaceClass")) == ccidInterfaceClass {
+				ccid[name[:i]] = true
+			}
+		}
+	}
+	return ccid
+}
+
+// readerNameTokens extracts the matchable tokens of a pcscd reader
+// name: the hotplug index groups stripped by normalizeReaderName, the
+// parenthesized serial suffix pcscd optionally appends (" (0)" on a
+// placeholder unit) and bare placeholder zeros dropped, the remaining
+// fields upper cased. Every token must appear in the USB manufacturer
+// and product strings of the reader's device.
+func readerNameTokens(reader string) []string {
+	var tokens []string
+	for _, field := range strings.Fields(normalizeReaderName(reader)) {
+		token := strings.ToUpper(field)
+		if isHotplugIndex(field) {
+			continue // enumeration group, sometimes trapped before a serial suffix
+		}
+		if len(token) >= 2 && token[0] == '(' && token[len(token)-1] == ')' {
+			continue
+		}
+		if strings.Trim(token, "0") == "" {
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens
+}
+
+// tokensIn reports whether every token appears in the device
+// identification string, case folded by the caller.
+func tokensIn(device string, tokens []string) bool {
+	for _, token := range tokens {
+		if !strings.Contains(device, token) {
+			return false
+		}
+	}
+	return true
+}
+
+// readSysString parses a sysfs text attribute, absent or unreadable
+// files answer the empty string.
+func readSysString(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// readSysHex parses a hexadecimal sysfs number file, absent or
+// malformed files answer 0.
+func readSysHex(path string) uint32 {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 16, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
 }
 
 // readSysNum parses a decimal sysfs number file, absent or malformed

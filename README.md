@@ -55,7 +55,7 @@ Readers get the same treatment, with three tiers in decreasing portability:
 | --- | --- | --- | --- | --- |
 | Model | normalized pcscd reader name (volatile hotplug indices stripped) | `pcscid/reader/v1` | everything | always |
 | Unit: hardware serial | `SCARD_ATTR_VENDOR_IFD_SERIAL_NO`, the USB iSerial burned into the unit | `pcscid/reader/v2` | machines, ports, daemon restarts | always (when the driver serves one) |
-| Unit: USB port path | `SCARD_ATTR_CHANNEL_ID` → sysfs `devpath` (e.g. `2-1.3`) | `pcscid/reader/v3` | daemon restarts, reboots, same port | `PCSCID_USB_PATH_ID=1` |
+| Unit: USB port path | `SCARD_ATTR_CHANNEL_ID` → sysfs `devpath` (e.g. `2-1.3`), or the sysfs CCID device scan when the driver serves no channel id | `pcscid/reader/v3` | daemon restarts, reboots, same port | `PCSCID_USB_PATH_ID=1` |
 | Machine scope | `MachineID()`, the MAC addresses of the physical ethernet ports | `pcscid/reader/m1` | everything within one machine | `PCSCID_MAC_ID=1` |
 
 Two units of the same model that report **no usable serial** — the ACS ACR122U family ships the same all-zero iSerial on every unit — collide on the model tag. The two options close that gap, opt-in because each trades portability:
@@ -73,7 +73,7 @@ $ PCSCID_MAC_ID=1 ./pcscid
 $ PCSCID_USB_PATH_ID=1 PCSCID_MAC_ID=1 ./pcscid
 ```
 
-The MAC filter takes only **physical ethernet ports** (sysfs `type` 1, a backing `device`, no `phy80211`): wifi, loopback, bridges, bonds, vlans and veth never enter the machine identity. The unit facts travel in `Event.ReaderSerial` / `Event.ReaderPort`, the composed tag in `Event.ReaderTag`. On the ACR122U specifically, neither the iSerial nor any NVRAM field is writable by host software — the port anchor is the only software-only per-unit identity that hardware has.
+The MAC filter takes only **physical ethernet ports** (sysfs `type` 1, a backing `device`, no `phy80211`): wifi, loopback, bridges, bonds, vlans and veth never enter the machine identity. The unit facts travel in `Event.ReaderSerial` / `Event.ReaderPort`, the composed tag in `Event.ReaderTag`. On the ACR122U specifically, neither the iSerial nor any NVRAM field is writable by host software — the port anchor is the only software-only per-unit identity that hardware has. The port resolution is two staged: the driver's channel id first, then a sysfs scan for the reader's CCID device by name (manufacturer and product strings, `bInterfaceClass 0x0B`) — unique per kiosk with one reader of a model, ambiguous only for identical units when the driver serves no channel id, which is then reported as a qualified error on stderr.
 
 ## Quick start
 
