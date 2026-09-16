@@ -10,9 +10,11 @@
 //
 // At startup every reader registered with pcscd is evaluated once
 // (pcscid.IdentifyReaders) and its details and hashes are printed on
-// stderr: reader name, model tag, per-unit facts when a card is
-// present to probe them, portability tier, effective tag, and the
-// identification of a card already sitting on the reader.
+// stderr: reader name, model tag, per-unit facts (the USB port path
+// resolves card-less when exactly one CCID device matches, the
+// hardware serial needs a presented card), portability tier,
+// effective tag, and the identification of a card already sitting on
+// the reader.
 //
 // With PCSCID_HTTP_ADDR set to a listen address, for example
 // "127.0.0.1:8976", it additionally serves the loopback HTTP bridge
@@ -115,10 +117,10 @@ func run() error {
 	// reader currently registered with pcscd, print its details and
 	// hashes before the first card is presented, so the operator
 	// sees which reader names, unit facts and tags the effective
-	// configuration produces. The probe of the per-unit facts needs a
-	// card connection, so readers reported without a card stay on
-	// their model level tag in this report; their insert events
-	// upgrade the tag as soon as a card arrives.
+	// configuration produces. The USB port path resolves card-less
+	// when it is unambiguous; the serial probe needs a card
+	// connection, so readers reported without a card upgrade their
+	// tier as soon as a card arrives.
 	readers, err := pcscid.IdentifyReaders(&pcscid.Options{
 		Logger:    logger,
 		USBPathID: usbPathID,
@@ -149,9 +151,11 @@ func run() error {
 				"card_type", r.Card.Type,
 				"card_source", r.Card.Source)
 		} else {
-			details = append(details,
-				"card", "absent",
-				"note", "unit facts need a presented card, the report starts at the model level tag")
+			note := "unit facts need a presented card, the report starts at the model level tag"
+			if r.Port != "" {
+				note = "usb port pinned from the sysfs device scan; the hardware serial needs a presented card"
+			}
+			details = append(details, "card", "absent", "note", note)
 		}
 		logger.Info("reader identified", details...)
 	}

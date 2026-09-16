@@ -66,9 +66,13 @@ type ReaderInfo struct {
 // plus the identification of a card that is already present. The
 // evaluation uses the same options and derivations as Watch, so the
 // reported Tag is exactly the tag the reader's insertion events will
-// carry. Readers without a present card cannot be probed for their
-// unit facts (the probe needs the card connection), they report the
-// model level tier.
+// carry. Readers with a presented card are probed over a full card
+// connection (serial, port, card UID). Readers without a card cannot
+// open the connection the driver attributes need, but with
+// USBPathID enabled their USB port is still pinned from the sysfs
+// device scan when it is unambiguous (or every other identical unit is
+// already owned by its own probe); they report the model level tier
+// otherwise.
 //
 // When the pcscd socket cannot be reached, IdentifyReaders fails with
 // that error, the pcscd service is a hard requirement.
@@ -83,6 +87,7 @@ func IdentifyReaders(opts *Options) ([]ReaderInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pcscid: reader states unreadable: %w", err)
 	}
+	reg := newUnitRegistry()
 	readers := make([]ReaderInfo, 0, len(states))
 	for _, st := range states {
 		info := ReaderInfo{
@@ -91,10 +96,26 @@ func IdentifyReaders(opts *Options) ([]ReaderInfo, error) {
 			CardPresent: st.State&pcsc.ReaderPresent != 0,
 		}
 		if info.CardPresent {
-			serial, port := probeReaderUnit(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath)
-			info.Serial = serial
-			info.Port = port
-			info.Card = identify(cl, lg, st, serial, port, env.machine)
+			facts := probeReaderCard(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, reg.byPort)
+			facts = reg.adopt(lg, st.Reader, facts)
+			info.Serial = facts.serial
+			info.Port = facts.port
+			info.Card = identify(lg, st, facts, env.machine)
+		} else if env.useUSBPath {
+			// Without a card there is no connection and no probe
+			// traffic, but the sysfs device scan still pins the
+			// port when it is unambiguous: exactly one CCID device
+			// matches the reader name, or every other identical
+			// unit is already claimed by its own probe.
+			port, reason := usbPortPathByReader(lg, env.sysfsRoot, st.Reader, nil, nil, reg.byPort)
+			if port != "" {
+				info.Port = reg.adopt(lg, st.Reader, readerFacts{port: port}).port
+				lg.Info("reader usb port pinned without a card",
+					"reader", st.Reader, "port", info.Port)
+			} else {
+				lg.Debug("reader usb port not pinned card-less",
+					"reader", st.Reader, "reason", reason)
+			}
 		}
 		info.Tier = unitTier(info.Serial, info.Port)
 		info.Tag = ReaderTagWithMachine(st.Reader, info.Serial, info.Port, env.machine)

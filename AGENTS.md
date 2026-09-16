@@ -10,9 +10,10 @@ in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
 At startup the sample app evaluates every reader registered with
 pcscd once (`pcscid.IdentifyReaders`, `readers.go`) and prints its
 details and hashes on stderr at info level: reader name, model tag,
-per-unit facts (serial, USB port path) when a card is present to
-probe them, portability tier, effective tag under the configured
-options, and the identification of a card already present.
+per-unit facts (the USB port path resolves card-less when it is
+unambiguous, the hardware serial needs a presented card),
+portability tier, effective tag under the configured options, and
+the identification of a card already present.
 `PCSCID_HTTP_ADDR` (env var config) turns on the loopback HTTP
 bridge of the same binary for browser pages that cannot open the
 pcscd socket. `PCSCID_USB_PATH_ID=1` opts into the physical USB port
@@ -114,21 +115,44 @@ from the same vendor and product table). Exactly one matching device
 identifies the port. N identical units (same model, placeholder
 serial, no channel id) are told apart by their USB traffic: the unit
 probe snapshots the sysfs `urbnum` counter of every candidate before
-and after its own card connection and attribute reads — that exchange
-submits a burst of URBs to exactly the probed physical device, so
-the counter that moved identifies the unit, independent of the
-daemon's reader order (an order aligned mapping would shuffle the
-units on every restart). The correlation is exact and re-derived on
-every presentation, so the same physical reader on the same port
-keeps its full USB port path (devpath) and its tag across service
-restarts, daemon restarts and reboots. A counter that does not single
-one device out refuses with the qualified error. Either way the port
-travels into `ReaderTagWithUnit` as hash domain `pcscid/reader/v3` —
-stable per port across daemon restarts and reboots, but it changes
-when the reader moves to another port. With the option enabled a
-port that stays unresolved is reported as a qualified error naming
-every failed step (driver attribute, sysfs resolution), the reader
-then keeps the model level tag, which two identical units share.
+and after its own card exchanges — a plain card connection submits
+NO URBs at all (the daemon already powered the card, both attribute
+answers come from driver memory), so the probe window is the UID
+exchange plus pinning exchanges (`probeReaderCard`, real CCID bulk
+round trips), which submit a burst of URBs to exactly the probed
+physical device. The counter that moved identifies the unit,
+independent of the daemon's reader order (an order aligned mapping
+would shuffle the units on every restart). The correlation is exact
+and re-derived on every presentation, so the same physical reader on
+the same port keeps its full USB port path (devpath) and its tag
+across service restarts, daemon restarts and reboots. A counter that
+does not single one device out refuses with the qualified error —
+unless every other candidate is already owned by another reader of
+the session, then the one free device is the unit's (elimination,
+sound because one daemon reader is one physical unit). The session's
+`unitRegistry` makes the identity persistent and collision free: a
+resolved port is claimed by exactly one reader name, a second reader
+never adopts it (a USB port hosts one unit; a collision would be a
+wrong guess reported as an error instead), a transient probe failure
+falls back to the remembered identity so a reader's tag cannot flip,
+and a reader that disappears releases its claim. The registry lives
+per daemon connection and is dropped on reconnect: a daemon restart
+re-enumerates the volatile name suffixes, remembered facts would
+answer to the wrong physical unit. The port identity is qualified
+with the pcscd slot group of the reader name (`portIdentity`,
+"2-1.3#01") for multi-slot units that serve one reader per slot on
+one USB device, the first slot keeps the plain devpath so existing
+tags stay stable. Either way the port travels into `ReaderTagWithUnit`
+as hash domain `pcscid/reader/v3` — stable per port across daemon
+restarts and reboots, but it changes when the reader moves to another
+port. With the option enabled a port that stays unresolved is
+reported as a qualified error naming every failed step (driver
+attribute, sysfs resolution), the reader then keeps the model level
+tag, which two identical units share. The startup inventory resolves
+card-less readers through the same sysfs name scan (no probe traffic
+without a card: a single unambiguous candidate, or elimination over
+the already claimed ones, pins the port; more than one free candidate
+refuses honestly).
 `MachineID()` reads the network stack through
 sysfs (`/sys/class/net`) for the stable hardware MAC addresses of
 the physical ethernet ports (type ethernet, backing device symlink,

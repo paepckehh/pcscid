@@ -350,23 +350,23 @@ func TestUsbPortPathByReader(t *testing.T) {
 		{devpath: "3-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"03"}}, // no CCID interface
 		{devpath: "4-1", manufacturer: "Generic", product: "Mass Storage", ifaces: []string{"08"}},
 	})
-	port, reason := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 01 00 00", nil, nil)
+	port, reason := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 01 00 00", nil, nil, nil)
 	if port != "1-2" || reason != "" {
 		t.Errorf("usbPortPathByReader = %q, %q, want 1-2 and no reason", port, reason)
 	}
 	// The hotplug indices are stripped before matching.
-	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 07 00 00", nil, nil); port != "1-2" {
+	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U 07 00 00", nil, nil, nil); port != "1-2" {
 		t.Errorf("usbPortPathByReader(hotplug variant) = %q, want 1-2", port)
 	}
 	// A parenthesized placeholder serial never blocks the match.
-	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U (0) 01 00 00", nil, nil); port != "1-2" {
+	if port, _ := usbPortPathByReader(discardLogger(), root, "ACS ACR122U (0) 01 00 00", nil, nil, nil); port != "1-2" {
 		t.Errorf("usbPortPathByReader(placeholder serial) = %q, want 1-2", port)
 	}
-	if port, reason := usbPortPathByReader(discardLogger(), root, "Cherry GmbH SmartTerminal XX44", nil, nil); port != "" || reason == "" {
+	if port, reason := usbPortPathByReader(discardLogger(), root, "Cherry GmbH SmartTerminal XX44", nil, nil, nil); port != "" || reason == "" {
 		t.Errorf("usbPortPathByReader(unknown model) = %q, %q, want empty and a reason", port, reason)
 	}
 	// A different CCID model resolves to its own port.
-	if port, reason := usbPortPathByReader(discardLogger(), root, "Yubico YubiKey CCID 01 00 00", nil, nil); port != "2-1.4" || reason != "" {
+	if port, reason := usbPortPathByReader(discardLogger(), root, "Yubico YubiKey CCID 01 00 00", nil, nil, nil); port != "2-1.4" || reason != "" {
 		t.Errorf("usbPortPathByReader(single yubikey) = %q, %q, want 2-1.4 and no reason", port, reason)
 	}
 	// Three identical units: the probe traffic singles the unit out.
@@ -377,17 +377,51 @@ func TestUsbPortPathByReader(t *testing.T) {
 	})
 	before := usbUrbSnapshot(trio)
 	after := map[string]uint32{"1-1": 100, "1-2": 112, "1-4": 100} // the probe talked to 1-2
-	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, after); port != "1-2" || reason != "" {
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, after, nil); port != "1-2" || reason != "" {
 		t.Errorf("usbPortPathByReader(traffic winner) = %q, %q, want 1-2 and no reason", port, reason)
 	}
 	// Equal movement (or none) refuses instead of guessing.
 	flat := map[string]uint32{"1-1": 100, "1-2": 100, "1-4": 100}
-	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, flat); port != "" || reason == "" {
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, flat, nil); port != "" || reason == "" {
 		t.Errorf("usbPortPathByReader(no movement) = %q, %q, want empty and a reason", port, reason)
 	}
 	moved := map[string]uint32{"1-1": 100, "1-2": 103, "1-4": 103}
-	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, moved); port != "" || reason == "" {
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, moved, nil); port != "" || reason == "" {
 		t.Errorf("usbPortPathByReader(equal movement) = %q, %q, want empty and a reason", port, reason)
+	}
+	// A missing snapshot carries no traffic evidence and refuses.
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", nil, after, nil); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(missing snapshot) = %q, %q, want empty and a reason", port, reason)
+	}
+	// Without traffic, but every other candidate owned by another
+	// reader, the one free candidate is the unit's port.
+	claims := map[string]string{"1-1": "ACS ACR122U 00 00", "1-4": "ACS ACR122U 02 00"}
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", before, flat, claims); port != "1-2" || reason != "" {
+		t.Errorf("usbPortPathByReader(elimination) = %q, %q, want 1-2 and no reason", port, reason)
+	}
+	// A card-less scan (no snapshots) refuses on free candidates.
+	if port, reason := usbPortPathByReader(discardLogger(), trio, "ACS ACR122U 01 00 00", nil, nil, nil); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(card-less, no claims) = %q, %q, want empty and a reason", port, reason)
+	}
+	// A candidate owned by another reader is never handed out twice.
+	solo := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+	})
+	if port, reason := usbPortPathByReader(discardLogger(), solo, "ACS ACR122U 01 00 00", nil, nil, map[string]string{"1-1": "ACS ACR122U 00 00"}); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(claimed single candidate) = %q, %q, want empty and a reason", port, reason)
+	}
+	duo := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+	})
+	beforeDuo := usbUrbSnapshot(duo)
+	if port, reason := usbPortPathByReader(discardLogger(), duo, "ACS ACR122U 01 00 00", beforeDuo, map[string]uint32{"1-1": 108, "1-2": 100}, map[string]string{"1-1": "ACS ACR122U 00 00"}); port != "" || reason == "" {
+		t.Errorf("usbPortPathByReader(claimed traffic winner) = %q, %q, want empty and a reason", port, reason)
+	}
+	// Card-less with one free candidate: the owned device belongs to
+	// the other reader, so this unit is on the free one.
+	if port, reason := usbPortPathByReader(discardLogger(), duo, "ACS ACR122U 01 00 00", nil, nil, map[string]string{"1-1": "ACS ACR122U 00 00"}); port != "1-2" || reason != "" {
+		t.Errorf("usbPortPathByReader(card-less elimination) = %q, %q, want 1-2 and no reason", port, reason)
 	}
 }
 
@@ -556,6 +590,87 @@ func TestWatchIdentifiesIdenticalReadersByTraffic(t *testing.T) {
 	if ev.ReaderPort != wiring[reader] || ev.ReaderTag != tags[reader] {
 		t.Errorf("re-presented reader got port %q tag %q, want %q and the reproduced tag %q",
 			ev.ReaderPort, ev.ReaderTag, wiring[reader], tags[reader])
+	}
+	// A re-presentation whose probe traffic does not single the device
+	// out (transient timing) keeps the port: the session registry owns
+	// the mapping, the other candidates are claimed by their own
+	// readers, so the unit is pinned by elimination instead of
+	// flipping to the model tag.
+	fake.RemoveCard(reader)
+	if ev := receiveEvent(t, events, 5*time.Second); ev.Kind != KindRemove {
+		t.Fatalf("kind = %v, want remove", ev.Kind)
+	}
+	fake.InsertCard(reader, mifareATR, []byte{0x04, 0x77, 0x88, 0x99})
+	ev = receiveEvent(t, events, 5*time.Second) // no bumpUrbNum: no traffic signal
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.ReaderPort != wiring[reader] || ev.ReaderTag != tags[reader] {
+		t.Errorf("traffic-less re-presentation got port %q tag %q, want the persisted %q and %q",
+			ev.ReaderPort, ev.ReaderTag, wiring[reader], tags[reader])
+	}
+}
+
+// TestPortIdentity pins the slot qualification of the port identity: a
+// USB device hosts exactly one unit, but a multi-slot unit serves one
+// reader per slot, so the slots qualify the devpath with the pcscd
+// slot group of the reader name. The first slot keeps the plain
+// devpath, so existing port derived tags stay stable.
+func TestPortIdentity(t *testing.T) {
+	t.Parallel()
+	if got := portIdentity("ACS ACR122U 01 00", "1-2"); got != "1-2" {
+		t.Errorf("portIdentity(slot 00) = %q, want the plain devpath 1-2", got)
+	}
+	if got := portIdentity("ACS ACR122U 01 01", "1-2"); got != "1-2#01" {
+		t.Errorf("portIdentity(slot 01) = %q, want 1-2#01", got)
+	}
+	if got := portIdentity("Some Reader AB", "1-2"); got != "1-2" {
+		t.Errorf("portIdentity(no pcscd groups) = %q, want the plain devpath 1-2", got)
+	}
+	if got := portIdentity("ACS ACR122U 01", "1-2"); got != "1-2" {
+		t.Errorf("portIdentity(one group only) = %q, want the plain devpath 1-2", got)
+	}
+}
+
+// TestUnitRegistryAdopt pins the session semantics of the unit
+// registry: fresh facts win, a fresh failure keeps the remembered
+// identity, a port owned by another reader is never adopted, and a
+// forgotten reader releases its port.
+func TestUnitRegistryAdopt(t *testing.T) {
+	t.Parallel()
+	lg := discardLogger()
+	reg := newUnitRegistry()
+	// Fresh facts are adopted and claim the port.
+	got := reg.adopt(lg, "A 00 00", readerFacts{serial: "S1", port: "1-1"})
+	if got.serial != "S1" || got.port != "1-1" {
+		t.Fatalf("adopt = %+v, want serial S1 port 1-1", got)
+	}
+	// A later probe without facts keeps the remembered identity.
+	got = reg.adopt(lg, "A 00 00", readerFacts{})
+	if got.serial != "S1" || got.port != "1-1" {
+		t.Errorf("adopt after failure = %+v, want the remembered serial S1 port 1-1", got)
+	}
+	// A port owned by another reader is refused.
+	got = reg.adopt(lg, "A 01 00", readerFacts{port: "1-1"})
+	if got.port != "" {
+		t.Errorf("adopt of a foreign port = %q, want refused (empty)", got.port)
+	}
+	// A fresh different port moves the claim with the reader.
+	got = reg.adopt(lg, "A 00 00", readerFacts{port: "1-3"})
+	if got.port != "1-3" {
+		t.Errorf("adopt of a moved port = %q, want 1-3", got.port)
+	}
+	if owner, taken := reg.byPort["1-1"]; taken && owner != "A 01 00" {
+		t.Errorf("the old port claim outlived the move, owner %q", owner)
+	}
+	// Forgetting the reader releases its port for others.
+	reg.forget("A 00 00")
+	if owner, taken := reg.byPort["1-3"]; taken {
+		t.Errorf("port still claimed by %q after forget", owner)
+	}
+	got = reg.adopt(lg, "A 01 00", readerFacts{port: "1-3"})
+	if got.port != "1-3" {
+		t.Errorf("adopt after release = %q, want 1-3", got.port)
 	}
 }
 

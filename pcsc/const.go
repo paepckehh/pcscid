@@ -54,6 +54,7 @@ const (
 	errReaderUnavailable uint32 = 0x80100017
 	errNoService         uint32 = 0x8010001D
 	errServiceStopped    uint32 = 0x8010001E
+	errUnsupportedFeat   uint32 = 0x8010001F
 	errNoReaders         uint32 = 0x8010002E
 	errCommDataLost      uint32 = 0x8010002F
 )
@@ -75,6 +76,7 @@ var errorNames = map[uint32]string{
 	errReaderUnavailable: "SCARD_E_READER_UNAVAILABLE",
 	errNoService:         "SCARD_E_NO_SERVICE",
 	errServiceStopped:    "SCARD_E_SERVICE_STOPPED",
+	errUnsupportedFeat:   "SCARD_E_UNSUPPORTED_FEATURE",
 	errNoReaders:         "SCARD_E_NO_READERS_AVAILABLE",
 	errCommDataLost:      "SCARD_E_COMM_DATA_LOST",
 }

@@ -73,7 +73,7 @@ $ PCSCID_MAC_ID=1 ./pcscid
 $ PCSCID_USB_PATH_ID=1 PCSCID_MAC_ID=1 ./pcscid
 ```
 
-The MAC filter takes only **physical ethernet ports** (sysfs `type` 1, a backing `device`, no `phy80211`): wifi, loopback, bridges, bonds, vlans and veth never enter the machine identity. The unit facts travel in `Event.ReaderSerial` / `Event.ReaderPort`, the composed tag in `Event.ReaderTag`. On the ACR122U specifically, neither the iSerial nor any NVRAM field is writable by host software — the port anchor is the only software-only per-unit identity that hardware has. The port resolution is two staged: the driver's channel id first, then a sysfs scan for the reader's CCID device by name (manufacturer and product strings, `bInterfaceClass 0x0B`). Several identical units (same model, empty iSerial, no channel id) are told apart by their USB traffic: the unit probe snapshots every candidate device's sysfs `urbnum` counter before and after its own card connection, and the counter that moved belongs to the probed unit. That correlation is exact and independent of the daemon's reader order, so the same physical reader on the same full USB port path keeps its tag across service restarts, daemon restarts and reboots; a counter that does not single one device out refuses with a qualified error instead of guessing, leaving the reader on the stable model tag.
+The MAC filter takes only **physical ethernet ports** (sysfs `type` 1, a backing `device`, no `phy80211`): wifi, loopback, bridges, bonds, vlans and veth never enter the machine identity. The unit facts travel in `Event.ReaderSerial` / `Event.ReaderPort`, the composed tag in `Event.ReaderTag`. On the ACR122U specifically, neither the iSerial nor any NVRAM field is writable by host software — the port anchor is the only software-only per-unit identity that hardware has. The port resolution is two staged: the driver's channel id first, then a sysfs scan for the reader's CCID device by name (manufacturer and product strings, `bInterfaceClass 0x0B`). Several identical units (same model, empty iSerial, no channel id) are told apart by their USB traffic: a plain card connection submits **no** URBs at all (the daemon already powered the card, the attribute answers come from driver memory), so the probe window carries the card's UID exchange plus pinning exchanges — real CCID bulk round trips — and the unit probe snapshots every candidate device's sysfs `urbnum` counter before and after them; the counter that moved belongs to the probed unit. That correlation is exact and independent of the daemon's reader order, so the same physical reader on the same full USB port path keeps its tag across service restarts, daemon restarts and reboots; a counter that does not single one device out refuses instead of guessing — unless every other candidate is already owned by another reader of the session, then the one free device is the unit's (elimination). The session's unit registry keeps the identity **persistent and collision free**: a resolved port belongs to exactly one reader name, a second reader never adopts it, a transient probe failure falls back to the remembered identity so a reader's tag cannot flip between two presentations of the same card, and the registry is dropped on daemon reconnect because a restart re-enumerates the volatile name suffixes. A multi-slot unit (one USB device, one reader per slot) qualifies the port with the pcscd slot group of the reader name (`2-1.3#01`), the first slot keeps the plain devpath so existing tags stay stable.
 
 ## Quick start
 
@@ -85,7 +85,7 @@ $ ./pcscid
 
 One line per presentation: `#`, the reader tag, a colon, the btag. Nothing else — stdout is machine readable by design; the leading `#` marks a btag line.
 
-At startup stderr carries the **reader inventory**: every reader registered with pcscd is evaluated once and printed with its details and hashes — reader name, model tag, per-unit facts (serial, USB port path) when a card is present to probe them, the portability tier, the effective tag under the configured options, and the identification of a card that is already present:
+At startup stderr carries the **reader inventory**: every reader registered with pcscd is evaluated once and printed with its details and hashes — reader name, model tag, per-unit facts (the USB port path resolves card-less when it is unambiguous, the hardware serial needs a presented card), the portability tier, the effective tag under the configured options, and the identification of a card that is already present:
 
 ```console
 $ ./pcscid
@@ -94,7 +94,7 @@ time=... level=INFO msg="reader identified" reader="ACS ACR122U 01 00 00" \
     card=r3v-401-5gmr card_type="mifare classic 1k" card_source=uid
 ```
 
-A reader without a card cannot be probed for unit facts (the probe needs the card connection), it reports the model level tag until its first scan.
+A reader without a card cannot be probed for its hardware serial (that needs the card connection); with `PCSCID_USB_PATH_ID=1` its USB port is still pinned from the sysfs device scan when it is unambiguous, otherwise it reports the model level tag until its first scan upgrades the identity.
 
 `DEBUG=1` turns on a full verbose trace on stderr while stdout stays clean:
 
@@ -213,7 +213,7 @@ for ev := range events {
 
 `Watch` reports cards already present at startup, follows hot-plugged readers, reconnects across `pcscd` restarts without re-reporting still-present cards, and closes its channel when the context is cancelled.
 
-`IdentifyReaders(&opts)` answers the one-shot startup inventory the sample app prints: every registered reader with its details and hashes — model tag, probed unit facts, portability tier, effective tag and the identification of a card already present.
+`IdentifyReaders(&opts)` answers the one-shot startup inventory the sample app prints: every registered reader with its details and hashes — model tag, probed unit facts, portability tier, effective tag and the identification of a card already present. With `USBPathID` enabled every reader is pinned by its USB port at startup: the sysfs device scan resolves card-less readers too (one unambiguous candidate, or elimination over the already claimed ones); the hardware serial still waits for the first card presentation.
 
 The fine-grained pieces are exported too:
 

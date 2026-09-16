@@ -400,16 +400,19 @@ func watchLoop(ctx context.Context, cl *pcsc.Client, env watchEnv, lg *slog.Logg
 }
 
 // readerTracking remembers the last known presence of every reader so
-// a daemon restart does not re-report cards that never moved.
+// a daemon restart does not re-report cards that never moved, and the
+// per-session unit identities of the readers (see unitRegistry).
 type readerTracking struct {
 	present  map[string]bool
 	counters map[string]uint32
+	units    *unitRegistry
 }
 
 func newTracking() *readerTracking {
 	return &readerTracking{
 		present:  make(map[string]bool),
 		counters: make(map[string]uint32),
+		units:    newUnitRegistry(),
 	}
 }
 
@@ -419,8 +422,12 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 	// The event counters of a fresh connection mean nothing yet: a
 	// restarted daemon counts from zero again, so a still present
 	// card must not be re-reported just because its counter moved.
-	// Presence alone decides until the counters are known again.
+	// Presence alone decides until the counters are known again. The
+	// unit identities start over too: a daemon restart re-enumerates
+	// the volatile reader name suffixes, remembered facts would answer
+	// to the wrong physical unit.
 	tracking.counters = make(map[string]uint32)
+	tracking.units = newUnitRegistry()
 	for {
 		states, err := cl.States()
 		if err != nil {
@@ -438,13 +445,15 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 			if present {
 				prev, known := tracking.counters[st.Reader]
 				if !wasPresent || (known && prev != st.EventCounter) {
-					// The unit attributes need an open card
-					// connection, so the individual reader identity is
-					// only readable now, while the card is there.
-					serial, port := probeReaderUnit(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath)
-					card := identify(cl, lg, st, serial, port, env.machine)
-					tag := ReaderTagWithMachine(st.Reader, serial, port, env.machine)
-					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderTag: tag, ReaderSerial: serial, ReaderPort: port}) {
+					// The unit attributes and the card UID need an open
+					// card connection, so both are probed now, while the
+					// card is there, over one connection whose exchanges
+					// also carry the USB traffic that pins the unit.
+					facts := probeReaderCard(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, tracking.units.byPort)
+					facts = tracking.units.adopt(lg, st.Reader, facts)
+					card := identify(lg, st, facts, env.machine)
+					tag := ReaderTagWithMachine(st.Reader, facts.serial, facts.port, env.machine)
+					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderTag: tag, ReaderSerial: facts.serial, ReaderPort: facts.port}) {
 						return nil
 					}
 				}
@@ -467,6 +476,7 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 			}
 			delete(tracking.present, reader)
 			delete(tracking.counters, reader)
+			tracking.units.forget(reader)
 			if wasPresent {
 				if !emit(ctx, ch, Event{Kind: KindRemove, Reader: reader}) {
 					return nil
@@ -495,11 +505,12 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 	}
 }
 
-// identify builds the Card for a present reader state.
-func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial, port, machine string) *Card {
+// identify builds the Card for a present reader state from the facts
+// the merged probe gathered over its card connection.
+func identify(lg *slog.Logger, st pcsc.ReaderState, facts readerFacts, machine string) *Card {
 	cardType := DetectType(st.ATR)
 	card := &Card{Type: cardType, ATR: st.ATR, Reader: st.Reader}
-	uid, protocol := probeUID(cl, lg, st.Reader)
+	uid := facts.uid
 	card.UID = uid
 	if len(uid) > 0 {
 		card.ID = Btag(cardType, uid)
@@ -511,13 +522,14 @@ func identify(cl *pcsc.Client, lg *slog.Logger, st pcsc.ReaderState, serial, por
 	lg.Debug("card inserted",
 		"reader", st.Reader,
 		"id", card.ID,
-		"reader-tag", ReaderTagWithMachine(st.Reader, serial, port, machine),
-		"reader-serial", serial,
+		"reader-tag", ReaderTagWithMachine(st.Reader, facts.serial, facts.port, machine),
+		"reader-serial", facts.serial,
+		"reader-port", facts.port,
 		"type", cardType,
 		"source", card.Source,
 		"uid", fmt.Sprintf("% X", uid),
 		"atr", fmt.Sprintf("% X", st.ATR),
-		"protocol", protocolName(protocol))
+		"protocol", protocolName(facts.protocol))
 	return card
 }
 

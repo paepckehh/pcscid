@@ -76,26 +76,50 @@ const (
 	urbWinnerMargin   = 2
 )
 
-// probeReaderUnit asks the driver for the per-unit identity of reader:
-// its hardware serial and, only when no usable serial exists and
-// useUSBPath allows it, its USB port path. Both need an open card
-// connection, they are probed only while a card is presented. Failures
-// are best effort, an unusable serial and an unresolvable channel id
-// map to the empty strings, the caller then falls back to the model
-// level tag. With useUSBPath enabled the port resolution is two
-// staged: first the channel id through the driver, then the sysfs USB
-// tree scanned for the reader's CCID device by name, and with several
-// identical candidates the unit is singled out by its USB traffic —
-// the probe exchange itself moves the sysfs urbnum counter of exactly
-// the probed physical device, a snapshot taken before the connection
-// and one taken after the attribute reads identify it. That correlation
-// is exact and independent of the daemon's reader order, so the same
-// physical reader on the same port derives the same tag across
-// service restarts, daemon restarts and reboots. A port that stays
-// unresolved is reported as a qualified error naming every failed
-// step, because the operator asked for a per-unit identity and
-// silently losing it makes two identical readers collide on one tag.
-func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool) (serial, port string) {
+// pinningExchanges is the number of extra card exchanges the unit
+// probe submits when it must single the physical device out by its
+// USB traffic: together with the UID exchange (one CCID bulk round
+// trip each) they guarantee a burst of URBs to exactly the probed
+// device, far above the idle noise of the interrupt pipe, while a
+// plain card connection alone submits none (the daemon already
+// powered the card, and the driver attributes are answered from
+// memory).
+const pinningExchanges = 2
+
+// readerFacts bundles everything one probe gathers over a single card
+// connection: the per-unit identity facts of the reader (serial, port)
+// and the identity facts of the presented card (uid, protocol).
+type readerFacts struct {
+	serial   string
+	port     string
+	uid      []byte
+	protocol uint32
+}
+
+// probeReaderCard probes a reader while its card is presented and
+// gathers every fact over ONE card connection: the per-unit identity
+// (hardware serial and, only when no usable serial exists and
+// useUSBPath allows it, the physical USB port path) plus the UID of the
+// card. Failures are best effort, an unusable serial and an
+// unresolvable channel id map to the empty strings, the caller then
+// falls back to the model level tag. With useUSBPath enabled the port
+// resolution is two staged: first the channel id through the driver,
+// then the sysfs USB tree scanned for the reader's CCID device by name.
+// With several identical candidates the unit is singled out by its USB
+// traffic: the UID exchange and the pinning exchanges of this very
+// probe submit a burst of URBs to exactly the probed physical device,
+// a snapshot taken before the connection and one taken after the
+// exchanges identify it through the sysfs urbnum counter. That
+// correlation is exact and independent of the daemon's reader order,
+// so the same physical reader on the same port derives the same tag
+// across service restarts, daemon restarts and reboots. claims holds
+// the port identities already taken by other readers of the session
+// (see unitRegistry), claimed candidates are never guessed: the scan
+// either singles a free device out or refuses with a qualified error
+// naming every failed step, because the operator asked for a per-unit
+// identity and silently losing it makes two identical readers collide
+// on one tag.
+func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool, claims map[string]string) readerFacts {
 	// The traffic baseline must precede the first URB of this probe,
 	// the card connection itself already talks to the device.
 	var before map[string]uint32
@@ -111,7 +135,7 @@ func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 				"reader", reader, "error", err,
 				"consequence", "the reader keeps the model level tag, identical units share one tag")
 		}
-		return "", ""
+		return readerFacts{}
 	}
 	defer func() {
 		if err := card.Disconnect(pcsc.LeaveCard); err != nil {
@@ -119,44 +143,59 @@ func probeReaderUnit(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 		}
 	}()
 
-	serial = readVendorSerial(card, lg, reader)
-	if serial == "" && useUSBPath {
-		var reasons []string
+	var facts readerFacts
+	var reasons []string
+	facts.serial = readVendorSerial(card, lg, reader)
+	if facts.serial == "" && useUSBPath {
 		if bus, dev, reason := readChannelID(card, lg, reader); reason == "" {
-			var portReason string
-			port, portReason = usbPortPath(lg, sysfsRoot, bus, dev)
+			port, portReason := usbPortPath(lg, sysfsRoot, bus, dev)
 			if port != "" {
+				facts.port = portIdentity(reader, port)
 				lg.Debug("reader usb port resolved by channel id",
-					"reader", reader, "bus", bus, "device", dev, "port", port)
+					"reader", reader, "bus", bus, "device", dev, "port", facts.port)
 			} else {
 				reasons = append(reasons, portReason)
 			}
 		} else {
 			reasons = append(reasons, reason)
 		}
-		if port == "" {
-			var nameReason string
-			port, nameReason = usbPortPathByReader(lg, sysfsRoot, reader, before, usbUrbSnapshot(sysfsRoot))
-			if port != "" {
-				lg.Info("reader usb port resolved",
-					"reader", reader, "port", port)
-			} else {
-				reasons = append(reasons, nameReason)
-				lg.Error("reader usb port identity unresolved (PCSCID_USB_PATH_ID=1)",
-					"reader", reader,
-					"reason", strings.Join(reasons, "; "),
-					"sysfs", sysfsRoot,
-					"consequence", "the reader keeps the model level tag, identical units share one tag")
+	} else if facts.serial == "" {
+		lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
+	}
+	// The card identity exchange. It doubles as guaranteed USB traffic
+	// of the probe window: a plain card connection submits no URB at
+	// all (the daemon already powered the card, both attribute answers
+	// come from driver memory), so the UID round trip is what moves the
+	// sysfs urbnum counter of the probed device.
+	facts.uid, facts.protocol = transmitUID(card, lg, reader)
+	if useUSBPath && facts.serial == "" && facts.port == "" {
+		// Strengthen the traffic signal of the probe window before
+		// the correlation reads it: every exchange is another burst
+		// of URBs to exactly this unit.
+		for range pinningExchanges {
+			if _, err := card.Transmit(uidAPDU, 64); err != nil {
+				lg.Debug("reader usb traffic pinning exchange failed", "reader", reader, "error", err)
 			}
 		}
-	} else if serial == "" {
-		lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
+		port, reason := usbPortPathByReader(lg, sysfsRoot, reader, before, usbUrbSnapshot(sysfsRoot), claims)
+		if port != "" {
+			facts.port = port
+			lg.Info("reader usb port resolved",
+				"reader", reader, "port", port)
+		} else {
+			reasons = append(reasons, reason)
+			lg.Error("reader usb port identity unresolved (PCSCID_USB_PATH_ID=1)",
+				"reader", reader,
+				"reason", strings.Join(reasons, "; "),
+				"sysfs", sysfsRoot,
+				"consequence", "the reader keeps the model level tag, identical units share one tag")
+		}
 	}
 	// The identity outcome is reported at info level, so the USB
 	// anchoring is visible even without the debug trace.
 	lg.Info("reader unit identity",
-		"reader", reader, "serial", serial, "port", port, "tier", unitTier(serial, port))
-	return serial, port
+		"reader", reader, "serial", facts.serial, "port", facts.port, "tier", unitTier(facts.serial, facts.port))
+	return facts
 }
 
 // unitTier names the portability tier of the per-unit identity facts:
@@ -171,6 +210,132 @@ func unitTier(serial, port string) string {
 	default:
 		return "model"
 	}
+}
+
+// portIdentity qualifies the kernel physical USB port path of a reader
+// with its pcscd slot number when it is not the first slot. pcscd
+// appends two hex groups to every reader name, the enumeration digit
+// and the slot number ("... 01 00"), and a multi-slot unit serves one
+// reader per slot on ONE USB device: the plain devpath alone would
+// collide between the slots. The first slot ("00", also the only one
+// single-slot readers ever carry) keeps the plain devpath, so the port
+// derived reader tags of existing deployments stay stable. A name
+// without the two trailing hex groups is not a pcscd hotplug name and
+// keeps the plain devpath too.
+func portIdentity(reader, devpath string) string {
+	fields := strings.Fields(reader)
+	if len(fields) < 2 {
+		return devpath
+	}
+	slot, digit := fields[len(fields)-1], fields[len(fields)-2]
+	if len(slot) != 2 || len(digit) != 2 || !isHexGroup(slot) || !isHexGroup(digit) {
+		return devpath
+	}
+	if slot == "00" {
+		return devpath
+	}
+	return devpath + "#" + strings.ToLower(slot)
+}
+
+// isHexGroup reports whether s is a two character hexadecimal group,
+// the format of pcscd's trailing enumeration digit and slot number.
+func isHexGroup(s string) bool {
+	if len(s) != 2 {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// unitRegistry keeps the per-unit reader identity of one daemon
+// connection session (one Watch loop or one startup inventory)
+// persistent and collision free. A USB port hosts exactly one reader
+// unit, so with the port identity enabled (Options.USBPathID) two
+// readers must never share one port fact: byPort hands out every
+// resolved port to exactly one reader name, and a probe that resolves
+// a foreign port refuses it instead of producing a colliding tag.
+// facts remembers the last adopted identity of every reader, so a
+// transient probe failure cannot flip a reader back to the model level
+// tag between two presentations of the same card.
+//
+// The registry is per session and deliberately not persisted beyond
+// it: a daemon restart re-enumerates the volatile name suffixes, so
+// the mapping is re-derived from the physical probe evidence instead
+// of trusting remembered names.
+type unitRegistry struct {
+	facts  map[string]readerFacts // reader name to last adopted facts
+	byPort map[string]string      // port identity to claiming reader name
+}
+
+func newUnitRegistry() *unitRegistry {
+	return &unitRegistry{
+		facts:  make(map[string]readerFacts),
+		byPort: make(map[string]string),
+	}
+}
+
+// adopt merges freshly probed facts of reader into the session state
+// and answers the effective identity: a fresh fact wins over the
+// remembered one, a fresh failure falls back to the remembered one,
+// and a fresh port already owned by another reader is refused (first
+// claim wins, reassigning would ping-pong the port between two
+// readers claiming the same device). byPort is safe to hand to the
+// probe as its claims view, adopt is its only writer.
+func (r *unitRegistry) adopt(lg *slog.Logger, reader string, fresh readerFacts) readerFacts {
+	cached, known := r.facts[reader]
+	adopted := fresh
+	if adopted.serial == "" && known && cached.serial != "" {
+		adopted.serial = cached.serial
+		lg.Debug("reader serial reused from the session identity",
+			"reader", reader, "serial", adopted.serial)
+	}
+	if adopted.port != "" {
+		if owner, taken := r.byPort[adopted.port]; taken && owner != reader {
+			lg.Error("reader usb port identity collides with another reader (PCSCID_USB_PATH_ID=1)",
+				"reader", reader, "port", adopted.port, "claimed_by", owner,
+				"consequence", "the reader keeps its previous identity, the model tag if it has none")
+			adopted.port = ""
+		}
+	}
+	if adopted.port == "" && known && cached.port != "" {
+		// The probe resolved nothing this time: keep the port this
+		// reader already owns, so its tag cannot flip.
+		if owner, taken := r.byPort[cached.port]; !taken || owner == reader {
+			adopted.port = cached.port
+			lg.Debug("reader usb port reused from the session identity",
+				"reader", reader, "port", adopted.port)
+		}
+	}
+	if known && cached.port != "" && cached.port != adopted.port {
+		if owner, taken := r.byPort[cached.port]; taken && owner == reader {
+			delete(r.byPort, cached.port)
+		}
+	}
+	if adopted.port != "" {
+		r.byPort[adopted.port] = reader
+	}
+	r.facts[reader] = adopted
+	return adopted
+}
+
+// forget drops the session identity of a reader that disappeared from
+// the daemon, releasing its port claim for other readers to take.
+func (r *unitRegistry) forget(reader string) {
+	facts, known := r.facts[reader]
+	if !known {
+		return
+	}
+	if facts.port != "" {
+		if owner, taken := r.byPort[facts.port]; taken && owner == reader {
+			delete(r.byPort, facts.port)
+		}
+	}
+	delete(r.facts, reader)
 }
 
 // readVendorSerial asks for the reader hardware serial and filters the
@@ -281,19 +446,26 @@ func usbPortPath(lg *slog.Logger, root string, bus, dev uint32) (port, reason st
 // vendor and product table, which mirrors the USB manufacturer and
 // product strings, so the normalized reader name must appear inside
 // the device's identification strings and the device must carry a CCID
-// interface (bInterfaceClass 0x0B).
+// interface (bInterfaceClass 0x0B). The returned port is the qualified
+// port identity (see portIdentity), it is what the reader tag hashes.
 //
 // Exactly one matching device identifies the port directly. N matching
 // devices are N identical reader units: they are told apart by their
 // USB traffic, not by order — before and after hold the sysfs urbnum
-// counters of the probe window (see probeReaderUnit), and the device
+// counters of the probe window (see probeReaderCard), and the device
 // whose counter moved is the probed unit. The correlation is exact and
 // independent of the daemon's reader order, so the same physical
 // reader on the same port keeps its tag across service restarts,
-// daemon restarts and reboots. When the counters do not single one
-// device out the scan refuses with a qualified reason, the reader then
-// keeps the stable model level tag instead of a shuffling guess.
-func usbPortPathByReader(lg *slog.Logger, root, reader string, before, after map[string]uint32) (port, reason string) {
+// daemon restarts and reboots. claims maps port identities to the
+// readers that already own them: a claimed port is never handed to a
+// second reader (a USB port hosts exactly one unit, a collision would
+// be a wrong guess), and when the traffic does not single a device out
+// but every other candidate is already owned, the one free candidate
+// identifies the unit by elimination. When neither traffic nor the
+// claims single one device out the scan refuses with a qualified
+// reason, the reader then keeps the stable model level tag instead of
+// a shuffling guess.
+func usbPortPathByReader(lg *slog.Logger, root, reader string, before, after map[string]uint32, claims map[string]string) (port, reason string) {
 	if root == "" {
 		return "", "no sysfs root is configured to scan for the reader's USB device"
 	}
@@ -325,32 +497,71 @@ func usbPortPathByReader(lg *slog.Logger, root, reader string, before, after map
 		}
 		candidates = append(candidates, name)
 	}
+	resolve := func(name string) (string, string) {
+		devpath := readSysString(filepath.Join(root, name, "devpath"))
+		if devpath == "" {
+			return "", fmt.Sprintf("the USB device %s carries no devpath", name)
+		}
+		return portIdentity(reader, devpath), ""
+	}
+	claimed := func(port string) (string, bool) {
+		owner, ok := claims[port]
+		return owner, ok && owner != reader
+	}
 	switch len(candidates) {
 	case 0:
 		return "", "no CCID USB device in sysfs matches the reader name"
 	case 1:
-		devpath := readSysString(filepath.Join(root, candidates[0], "devpath"))
-		if devpath == "" {
-			return "", fmt.Sprintf("the USB device %s carries no devpath", candidates[0])
+		port, reason := resolve(candidates[0])
+		if port == "" {
+			return "", reason
+		}
+		if owner, taken := claimed(port); taken {
+			return "", fmt.Sprintf("the USB port %s already identifies reader %q, the device cannot belong to two readers", port, owner)
 		}
 		lg.Debug("usb port path name scan matched",
-			"reader", reader, "device", candidates[0], "port", devpath)
-		return devpath, ""
+			"reader", reader, "device", candidates[0], "port", port)
+		return port, ""
 	}
-	// N identical units without a channel id: single the probed one out
-	// by its USB traffic across the probe window.
+	// N identical units: single the probed one out by its USB traffic
+	// across the probe window.
 	winner, ok := usbUrbWinner(before, after, candidates)
-	if !ok {
-		return "", fmt.Sprintf("%d CCID USB devices match the reader name and the usb traffic did not single one out, the unit mapping is ambiguous without the channel id", len(candidates))
+	if ok {
+		port, reason := resolve(winner)
+		if port == "" {
+			return "", reason
+		}
+		if owner, taken := claimed(port); taken {
+			return "", fmt.Sprintf("the usb traffic singles out the USB port %s but it already identifies reader %q, the device cannot belong to two readers", port, owner)
+		}
+		lg.Info("usb port resolved by traffic correlation",
+			"reader", reader, "device", winner, "port", port,
+			"urb", after[winner]-before[winner])
+		return port, ""
 	}
-	devpath := readSysString(filepath.Join(root, winner, "devpath"))
-	if devpath == "" {
-		return "", fmt.Sprintf("the USB device %s carries no devpath", winner)
+	// No decisive traffic: when every other candidate is already
+	// owned by another reader, the one free device is this unit's —
+	// each daemon reader is one physical unit, and none of the
+	// owned candidates can be this one.
+	var free []string
+	for _, candidate := range candidates {
+		port, reason := resolve(candidate)
+		if port == "" {
+			return "", reason
+		}
+		if _, taken := claimed(port); !taken {
+			free = append(free, port)
+		}
 	}
-	lg.Info("usb port resolved by traffic correlation",
-		"reader", reader, "device", winner, "port", devpath,
-		"urb", after[winner]-before[winner])
-	return devpath, ""
+	if len(free) == 1 {
+		lg.Info("usb port resolved by elimination, every other candidate is owned by another reader",
+			"reader", reader, "port", free[0])
+		return free[0], ""
+	}
+	if before == nil || after == nil {
+		return "", fmt.Sprintf("%d CCID USB devices match the reader name and no probe traffic is available to single one out, present a card on the reader to pin its unit", len(candidates))
+	}
+	return "", fmt.Sprintf("%d CCID USB devices match the reader name and the usb traffic did not single one out, the unit mapping is ambiguous without the channel id", len(candidates))
 }
 
 // usbUrbSnapshot reads the URB counter (sysfs urbnum) of every CCID USB
@@ -376,8 +587,13 @@ func usbUrbSnapshot(root string) map[string]uint32 {
 // between the two snapshots of the probe window: the probe exchange
 // submits a burst of URBs to exactly the probed device, idle identical
 // units stay put. The winner must clear a minimum delta and beat the
-// runner up by the margin, anything else is ambiguous and refuses.
+// runner up by the margin, anything else is ambiguous and refuses. A
+// missing snapshot (unreadable sysfs at either end of the window)
+// carries no traffic evidence and refuses too.
 func usbUrbWinner(before, after map[string]uint32, candidates []string) (name string, ok bool) {
+	if before == nil || after == nil {
+		return "", false
+	}
 	winner, winnerDelta, runnerUp := "", 0, 0
 	for _, candidate := range candidates {
 		delta := int(after[candidate]) - int(before[candidate])
@@ -421,7 +637,7 @@ func usbCCIDDevices(root string, entries []os.DirEntry) map[string]bool {
 // and product strings of the reader's device.
 func readerNameTokens(reader string) []string {
 	var tokens []string
-	for _, field := range strings.Fields(normalizeReaderName(reader)) {
+	for field := range strings.FieldsSeq(normalizeReaderName(reader)) {
 		token := strings.ToUpper(field)
 		if isHotplugIndex(field) {
 			continue // enumeration group, sometimes trapped before a serial suffix

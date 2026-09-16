@@ -35,21 +35,14 @@ func openCard(cl *pcsc.Client, reader string) (*pcsc.Card, error) {
 	return card, err
 }
 
-// probeUID connects to the card in reader and asks for its UID. It
-// returns nil when neither the card nor the reader can provide one,
-// the caller then falls back to ATR based, type level identification.
-func probeUID(cl *pcsc.Client, lg *slog.Logger, reader string) (uid []byte, protocol uint32) {
-	card, err := openCard(cl, reader)
-	if err != nil {
-		lg.Debug("connect failed, falling back to atr identity",
-			"reader", reader, "error", err)
-		return nil, 0
-	}
-	defer func() {
-		if err := card.Disconnect(pcsc.LeaveCard); err != nil {
-			lg.Debug("disconnect failed", "reader", reader, "error", err)
-		}
-	}()
+// transmitUID asks the presented card for its UID over an already
+// open card connection and returns nil when neither the card nor the
+// reader can provide one, the caller then falls back to ATR based,
+// type level identification. The exchange is real USB traffic to the
+// reader hardware (a CCID XfrBlock bulk round trip), which the unit
+// probe relies on to single the physical device out by its sysfs
+// urbnum counter.
+func transmitUID(card *pcsc.Card, lg *slog.Logger, reader string) (uid []byte, protocol uint32) {
 	resp, err := card.Transmit(uidAPDU, 64)
 	if err != nil {
 		lg.Debug("uid apdu failed, falling back to atr identity",

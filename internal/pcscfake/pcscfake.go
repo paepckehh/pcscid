@@ -40,7 +40,7 @@ const (
 	errInvalidHandle      uint32 = 0x80100003
 	errUnknownReader      uint32 = 0x80100009
 	errNoSmartcard        uint32 = 0x8010000C
-	errUnsupportedFeature uint32 = 0x80100022
+	errUnsupportedFeature uint32 = 0x8010001F // SCARD_E_UNSUPPORTED_FEATURE, like the real daemon
 	errServiceStopped     uint32 = 0x8010001E
 
 	attrVendorIFDSerialNo uint32 = 0x0103

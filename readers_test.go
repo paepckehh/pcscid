@@ -1,6 +1,7 @@
 package pcscid
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -145,6 +146,157 @@ func TestIdentifyReadersMACID(t *testing.T) {
 	}
 	if readers[0].Tag == readers[0].ModelTag {
 		t.Error("machine component must change the tag")
+	}
+}
+
+// TestIdentifyReadersCardlessPortPin proves the startup scan pins a
+// reader by its USB port even without a presented card: with
+// USBPathID enabled the sysfs device scan identifies the port as long
+// as exactly one CCID device matches the reader name, so every reader
+// is identified at startup, the driver attributes that need the card
+// connection still wait for the first presentation.
+func TestIdentifyReadersCardlessPortPin(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	fake.SetSerial("ACS ACR122U 01 00", "0") // card-less: unreadable either way
+	root := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+	})
+
+	readers, err := IdentifyReaders(&Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root,
+		USBPathID:    true,
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readers) != 1 {
+		t.Fatalf("readers = %d, want 1", len(readers))
+	}
+	r := readers[0]
+	if r.CardPresent || r.Card != nil {
+		t.Fatal("card reported without one")
+	}
+	if r.Port != "1-2" {
+		t.Errorf("port = %q, want the card-less pinned 1-2", r.Port)
+	}
+	if r.Tier != "port" {
+		t.Errorf("tier = %q, want port", r.Tier)
+	}
+	if r.Tag != ReaderTagWithUnit(r.Reader, "", "1-2") {
+		t.Errorf("tag = %q, want the port derived tag", r.Tag)
+	}
+	if r.Tag == r.ModelTag {
+		t.Error("the pinned port must change the tag")
+	}
+}
+
+// TestIdentifyReadersCardlessAmbiguousRefuses pins the honesty of the
+// startup scan: two identical units without cards cannot be told apart
+// (no connection, no probe traffic), the scan refuses instead of
+// guessing a port.
+func TestIdentifyReadersCardlessAmbiguousRefuses(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	fake.SetSerial("ACS ACR122U 00 00", "0")
+	fake.SetSerial("ACS ACR122U 01 00", "0")
+	root := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}},
+	})
+
+	readers, err := IdentifyReaders(&Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root,
+		USBPathID:    true,
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readers) != 2 {
+		t.Fatalf("readers = %d, want 2", len(readers))
+	}
+	for _, r := range readers {
+		if r.Port != "" {
+			t.Errorf("reader %q port = %q, want empty, the units are indistinguishable without a card", r.Reader, r.Port)
+		}
+		if r.Tier != "model" || r.Tag != r.ModelTag {
+			t.Errorf("reader %q tier = %q tag = %q, want model fallback", r.Reader, r.Tier, r.Tag)
+		}
+	}
+}
+
+// TestIdentifyReadersIdenticalUnitsUniqueTags drives the full collision
+// guarantee through the startup inventory and the watch pipeline: two
+// identical units (placeholder serial) resolved by their channel ids
+// must never share a reader tag, neither in the inventory nor in the
+// events, and the inventory must report exactly the events' tags.
+func TestIdentifyReadersIdenticalUnitsUniqueTags(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	root := fakeSysfsUSBNamed(t, []fakeUSBDevice{
+		{devpath: "1-1", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
+		{devpath: "1-2", manufacturer: "ACS", product: "ACR122U USB Reader", ifaces: []string{"0b"}, urbnum: "100"},
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	events, err := Watch(ctx, &Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root,
+		USBPathID:    true,
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wiring := map[string]uint32{
+		"ACS ACR122U 00 00": 0x00200101, // bus 1 dev 1, the 1-1 tree entry
+		"ACS ACR122U 01 00": 0x00200201, // bus 2 dev 1, the 1-2 tree entry
+	}
+	eventTags := make(map[string]string)
+	for reader, channel := range wiring {
+		fake.InsertCard(reader, mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+		fake.SetSerial(reader, "0")
+		fake.SetChannelID(reader, channel)
+		ev := receiveEvent(t, events, 5*time.Second)
+		if ev.Kind != KindInsert {
+			t.Fatalf("kind = %v, want insert", ev.Kind)
+		}
+		if ev.ReaderPort == "" {
+			t.Errorf("reader %q carries no port, the channel id must resolve it", ev.Reader)
+		}
+		eventTags[reader] = ev.ReaderTag
+	}
+	if eventTags["ACS ACR122U 00 00"] == eventTags["ACS ACR122U 01 00"] {
+		t.Errorf("two units share one event tag %q", eventTags["ACS ACR122U 00 00"])
+	}
+
+	// The startup inventory reports the same unique, port anchored tags.
+	readers, err := IdentifyReaders(&Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root,
+		USBPathID:    true,
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readers) != 2 {
+		t.Fatalf("readers = %d, want 2", len(readers))
+	}
+	for _, r := range readers {
+		if r.Tag != eventTags[r.Reader] {
+			t.Errorf("reader %q inventory tag = %q, event tag = %q, they must match", r.Reader, r.Tag, eventTags[r.Reader])
+		}
+		if r.Tier != "port" {
+			t.Errorf("reader %q tier = %q, want port", r.Reader, r.Tier)
+		}
+	}
+	if readers[0].Tag == readers[1].Tag {
+		t.Error("two identical units share one inventory tag")
 	}
 }
 
