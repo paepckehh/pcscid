@@ -3,9 +3,16 @@
 //
 // In normal mode stdout carries one line per card presentation and
 // nothing else: a '#' mark, the reader tag, a colon and the btag. A
-// version banner always goes to stderr; with DEBUG=1 in the
+// version banner and the startup reader inventory always go to
+// stderr; with DEBUG=1 in the
 // environment stderr additionally carries a full verbose trace of
 // every protocol step, while stdout stays machine readable.
+//
+// At startup every reader registered with pcscd is evaluated once
+// (pcscid.IdentifyReaders) and its details and hashes are printed on
+// stderr: reader name, model tag, per-unit facts when a card is
+// present to probe them, portability tier, effective tag, and the
+// identification of a card already sitting on the reader.
 //
 // With PCSCID_HTTP_ADDR set to a listen address, for example
 // "127.0.0.1:8976", it additionally serves the loopback HTTP bridge
@@ -102,6 +109,51 @@ func run() error {
 		} else {
 			logger.Info("machine identity not detected, reader tags stay unit level")
 		}
+	}
+
+	// The startup reader inventory: evaluate and identify every
+	// reader currently registered with pcscd, print its details and
+	// hashes before the first card is presented, so the operator
+	// sees which reader names, unit facts and tags the effective
+	// configuration produces. The probe of the per-unit facts needs a
+	// card connection, so readers reported without a card stay on
+	// their model level tag in this report; their insert events
+	// upgrade the tag as soon as a card arrives.
+	readers, err := pcscid.IdentifyReaders(&pcscid.Options{
+		Logger:    logger,
+		USBPathID: usbPathID,
+		MACID:     macID,
+	})
+	if err != nil {
+		return err
+	}
+	if len(readers) == 0 {
+		logger.Info("no readers registered with pcscd yet, waiting for hotplug")
+	}
+	for _, r := range readers {
+		details := []any{
+			"reader", r.Reader,
+			"model", r.ModelTag,
+			"tag", r.Tag,
+			"tier", r.Tier,
+		}
+		if r.Serial != "" {
+			details = append(details, "serial", r.Serial)
+		}
+		if r.Port != "" {
+			details = append(details, "port", r.Port)
+		}
+		if r.CardPresent {
+			details = append(details,
+				"card", r.Card.ID,
+				"card_type", r.Card.Type,
+				"card_source", r.Card.Source)
+		} else {
+			details = append(details,
+				"card", "absent",
+				"note", "unit facts need a presented card, the report starts at the model level tag")
+		}
+		logger.Info("reader identified", details...)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

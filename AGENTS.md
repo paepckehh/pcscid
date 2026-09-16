@@ -7,6 +7,12 @@ anything pcscd manages) with a short unique btag per individual card.
 `cmd/pcscid` prints `#xx-xxxx-xx:xxx-xxx-xxxx` (`#` prefixes the
 whole line, then reader tag, btag) per line
 in normal mode, `DEBUG=1` enables a full verbose trace on stderr.
+At startup the sample app evaluates every reader registered with
+pcscd once (`pcscid.IdentifyReaders`, `readers.go`) and prints its
+details and hashes on stderr at info level: reader name, model tag,
+per-unit facts (serial, USB port path) when a card is present to
+probe them, portability tier, effective tag under the configured
+options, and the identification of a card already present.
 `PCSCID_HTTP_ADDR` (env var config) turns on the loopback HTTP
 bridge of the same binary for browser pages that cannot open the
 pcscd socket. `PCSCID_USB_PATH_ID=1` opts into the physical USB port
@@ -45,6 +51,7 @@ cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.co
   same wire protocol used as an in-process daemon for tests: client
   and fake agreeing is itself under test.
 - Root package: `Watch` event loop and `Btag` derivation (`pcscid.go`),
+  startup reader inventory (`readers.go`),
   loopback HTTP bridge (`bridge.go`), ISO 7816-3 ATR parser (`atr.go`),
   card type detection (`cardtype.go`), UID probe (`uid.go`), SSHSIG
   line signatures (`sign.go`), semver injection (`version.go`).

@@ -85,6 +85,17 @@ $ ./pcscid
 
 One line per presentation: `#`, the reader tag, a colon, the btag. Nothing else — stdout is machine readable by design; the leading `#` marks a btag line.
 
+At startup stderr carries the **reader inventory**: every reader registered with pcscd is evaluated once and printed with its details and hashes — reader name, model tag, per-unit facts (serial, USB port path) when a card is present to probe them, the portability tier, the effective tag under the configured options, and the identification of a card that is already present:
+
+```console
+$ ./pcscid
+time=... level=INFO msg="reader identified" reader="ACS ACR122U 01 00 00" \
+    model=qr-xlrk-i5 tag=be-4t2k-pm tier=serial serial=A001 \
+    card=r3v-401-5gmr card_type="mifare classic 1k" card_source=uid
+```
+
+A reader without a card cannot be probed for unit facts (the probe needs the card connection), it reports the model level tag until its first scan.
+
 `DEBUG=1` turns on a full verbose trace on stderr while stdout stays clean:
 
 ```console
@@ -201,6 +212,8 @@ for ev := range events {
 ```
 
 `Watch` reports cards already present at startup, follows hot-plugged readers, reconnects across `pcscd` restarts without re-reporting still-present cards, and closes its channel when the context is cancelled.
+
+`IdentifyReaders(&opts)` answers the one-shot startup inventory the sample app prints: every registered reader with its details and hashes — model tag, probed unit facts, portability tier, effective tag and the identification of a card already present.
 
 The fine-grained pieces are exported too:
 
