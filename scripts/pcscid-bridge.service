@@ -19,6 +19,16 @@ After=pcscd.service network-online.target
 [Service]
 Type=simple
 Environment=PCSCID_HTTP_ADDR=127.0.0.1:8976
+# Reader identity: a shell export never reaches a systemd service, the
+# options must live here in the unit. PCSCID_USB_PATH_ID anchors
+# serial-less readers (ACS ACR122U) to their physical USB port: one
+# stable tag per unit and port across daemon restarts and reboots.
+Environment=PCSCID_USB_PATH_ID=1
+# Scope every reader tag to this machine's hardware MACs (distinct tags
+# per kiosk, tags no longer follow the reader to another machine):
+#Environment=PCSCID_MAC_ID=1
+# Sign every served line with an ssh-ed25519 key (path, passphrase-less):
+#Environment=PCSCID_SIGN_KEY=/etc/pcscid/ed25519
 ExecStart=/usr/local/bin/pcscid
 Restart=always
 RestartSec=2

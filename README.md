@@ -176,7 +176,7 @@ async function pending(after) {
 
 The `id` cursor is monotonic: pass the last seen `id` as `after` and `/pending` replays only what came after it (the ring retains the last 64 presentations). Every endpoint answers with `Access-Control-Allow-Origin: *`; unsupported methods are rejected with 405.
 
-A 2 s startup grace swallows Watch's initial "cards already present" report (a card left on a reader never triggers after a service restart) and the same reader+card pair is debounced for 3 s. `scripts/pcscid-bridge.service` is the ready-made, hardened systemd unit (`After=pcscd`, `DynamicUser`, `ProtectSystem=strict`, …).
+A 2 s startup grace swallows Watch's initial "cards already present" report (a card left on a reader never triggers after a service restart) and the same reader+card pair is debounced for 3 s. `scripts/pcscid-bridge.service` is the ready-made, hardened systemd unit (`After=pcscd`, `DynamicUser`, `ProtectSystem=strict`, …); it ships with `PCSCID_USB_PATH_ID=1` so serial-less kiosk readers get per-unit port tags, and every further `PCSCID_*` option (the shell export never reaches a systemd service) goes into the unit as an `Environment=` line. The startup settings report on stderr confirms what took effect: `journalctl -u pcscid-bridge` shows `settings ... usb_path_id=true`.
 
 ```console
 $ PCSCID_HTTP_ADDR=127.0.0.1:8976 ./pcscid
