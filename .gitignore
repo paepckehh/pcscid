@@ -6,3 +6,4 @@ coverage.*
 # other
 .attic 
 .crushrc
+/.crushrc

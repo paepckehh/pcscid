@@ -40,6 +40,27 @@ output line; an unusable key fails the startup.
 5. **Tag**: bump the patch segment only, never reuse/move/delete a tag: `git tag v0.0.$(($(git describe --tags --abbrev=0 | sed 's/^v0\.0\.//')+1))`
 6. **Push**: `git pull && git pull --tags && git push && git push --tags`.
 
+## Makefile targets
+
+- `make build` — removes a stale binary first (`touch` + `rm`), then
+  builds `./cmd/pcscid` with the git semver injected via `-ldflags`
+  (a failed build never leaves an old binary behind). `VERSION ?=`
+  overrides the `git describe` tag detection.
+- `make check` — read-only verification: `gofmt -l .`, `go vet ./...`,
+  `go mod tidy -diff`. Nothing is modified.
+- `make test` — `go test -count=1 -parallel $$(nproc) -p $$(nproc) ./...`;
+  `-count=1` disables test result caching, `-p` runs the packages in
+  parallel. Fully hardware free.
+- `make update` / `make push` — `git pull` (+ `--tags`) / pull plus
+  push of commits and tags.
+- `make deploy-test-nix` — sudo deploy of the fresh binary to
+  `/nix/persist/root/bin/pcscid` (rotating `.old`/`.old2` backups)
+  and a restart of `pcscid.service`; pilot kiosk only.
+- `make deps` — DESTRUCTIVE, never run it for a normal task: it
+  deletes `go.mod`/`go.sum` and re-inits the module (plus
+  `git config core.fileMode false`). The module has zero external
+  dependencies by design, there is nothing to resolve.
+
 ## Architecture
 
 ```text
@@ -51,8 +72,11 @@ cmd/pcscid  ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.co
 - `internal/pcscfake` is a second, independent implementation of the
   same wire protocol used as an in-process daemon for tests: client
   and fake agreeing is itself under test.
-- Root package: `Watch` event loop and `Btag` derivation (`pcscid.go`),
-  startup reader inventory (`readers.go`),
+- Root package: `Watch` event loop plus btag and reader tag derivation
+  (`Btag`, `ReaderTag*`, `normalizeReaderName` in `pcscid.go`), reader
+  unit identity — per-unit fact probing over the wire, sysfs USB port
+  resolution, `unitRegistry`, `MachineID` (`readerid.go`, the largest
+  file of the package), startup reader inventory (`readers.go`),
   loopback HTTP bridge (`bridge.go`), ISO 7816-3 ATR parser (`atr.go`),
   card type detection (`cardtype.go`), UID probe (`uid.go`), SSHSIG
   line signatures (`sign.go`), semver injection (`version.go`).
