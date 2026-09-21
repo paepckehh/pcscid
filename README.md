@@ -265,7 +265,7 @@ The empirical protocol gotchas (header-less responses, the unframed APDU bytes o
 - The bridge listens on **loopback only** by default (`PCSCID_HTTP_ALLOW_REMOTE` is the explicit, deliberate escape hatch).
 - Permissive CORS is a kiosk trade-off: it also means every page open in a browser *on the kiosk itself* can read scans — run bridge mode only on a locked-down terminal, never on a multi-user desktop.
 - The btag is a truncated SHA-256 (~52 bits) — an identifier, not a secret. Treat a btag like a username, never like a password or a key.
-- Transport responses are size-capped (1 MiB frames, short APDU buffers), so a misbehaving daemon cannot turn the client into a giant allocation.
+- Response reads are fixed-size structs (the client never trusts a daemon-side length except the transmit answer, which is capped at the 264-byte short APDU buffer with an error beyond it), so a misbehaving daemon cannot turn the client into a giant allocation.
 
 ## Requirements & install
 
@@ -285,6 +285,7 @@ cmd/pcscid/        sample app: bare btags, full trace with DEBUG=1, bridge with 
 pcsc/              pure Go pcscd wire-protocol client (Linux)
 internal/pcscfake  in-process fake pcscd daemon driving the hardware-free tests
 pcscid.go          Watch loop, event model, btag and reader tag derivation
+readerid.go        reader unit identity: serial/channel-id probes, sysfs USB port resolution, URB traffic correlation, machine identity
 bridge.go          loopback HTTP bridge: SSE + polling of reader tags and btags
 atr.go             ISO 7816-3 answer-to-reset parser
 cardtype.go        ATR to card type detection (PC/SC part 3 table, known ATRs)
