@@ -414,6 +414,65 @@ func TestWatchRandomUIDFallsBackToATR(t *testing.T) {
 	}
 }
 
+// TestWatchInsistsOnUIDAfterTransientFailures reproduces the intermittent
+// atr misidentification of a card with a valid uid: pcscd reports a
+// freshly inserted contactless card present before its activation has
+// settled, so the first connect can fail with no smartcard and the
+// first UID exchanges can fail on the transport. One single shot
+// identification silently degraded to the type level ATR identity
+// depending on when the probe ran; the identification must instead
+// retry the connect and the UID exchange and report the uid derived
+// btag.
+func TestWatchInsistsOnUIDAfterTransientFailures(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.InsertCard("R", mifareATR, uid)
+	// The activation race: the first connect attempt and the first two
+	// UID exchanges fail transiently.
+	fake.Reader("R").FailConnects = 1
+	fake.Reader("R").FailUIDProbes = 2
+
+	ev := receiveEvent(t, events, 3*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.Card.Source != "uid" {
+		t.Errorf("source = %q, want uid: a transient activation failure must not degrade the identity", ev.Card.Source)
+	}
+	if ev.Card.ID != Btag("mifare classic 1k", uid) {
+		t.Errorf("id = %q, want the uid derived btag %q", ev.Card.ID, Btag("mifare classic 1k", uid))
+	}
+	if !slices.Equal(ev.Card.UID, uid) {
+		t.Errorf("uid = % X, want % X", ev.Card.UID, uid)
+	}
+}
+
+// TestWatchStillFallsBackToATRWhenUIDNeverComes pins the other side of
+// the retry budget: a card whose UID exchange fails on every attempt,
+// not only while the activation settles, keeps the atr fallback.
+func TestWatchStillFallsBackToATRWhenUIDNeverComes(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	fake.InsertCard("R", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	fake.Reader("R").FailUIDProbes = 1000 // more than the retry budget
+
+	ev := receiveEvent(t, events, 5*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.Card.Source != "atr" {
+		t.Errorf("source = %q, want atr", ev.Card.Source)
+	}
+	if ev.Card.ID != Btag("mifare classic 1k", mifareATR) {
+		t.Errorf("id = %q, want the atr derived btag", ev.Card.ID)
+	}
+}
+
 func TestWatchNoRepeatWithoutChange(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)

@@ -128,7 +128,9 @@ func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 	}
 	card, err := openCard(cl, reader)
 	if err != nil {
-		lg.Debug("reader unit probe connect failed",
+		lg.Debug("reader unit probe connect failed after retries",
+			"reader", reader, "error", err)
+		lg.Error("card connection failed, the card identity falls back to the atr and the reader tag to the model",
 			"reader", reader, "error", err)
 		if useUSBPath {
 			lg.Error("reader unit identity unreadable, the card connection failed (PCSCID_USB_PATH_ID=1)",

@@ -40,6 +40,7 @@ const (
 	errInvalidHandle      uint32 = 0x80100003
 	errUnknownReader      uint32 = 0x80100009
 	errNoSmartcard        uint32 = 0x8010000C
+	errCommDataLost       uint32 = 0x8010002F // SCARD_E_COMM_DATA_LOST, a transient transport failure
 	errUnsupportedFeature uint32 = 0x8010001F // SCARD_E_UNSUPPORTED_FEATURE, like the real daemon
 	errServiceStopped     uint32 = 0x8010001E
 
@@ -110,6 +111,16 @@ type Reader struct {
 	ChannelID    uint32 // SCARD_ATTR_CHANNEL_ID answer, 0x0020BBAA, 0 means unsupported
 	Present      bool
 	EventCounter uint32
+	// FailConnects makes the next n connects answer SCARD_E_NO_SMARTCARD:
+	// the reader reports the card present before its activation has
+	// settled, the transient failure of the earliest connect attempts.
+	FailConnects int
+	// FailUIDProbes makes the next n UID probes answer
+	// SCARD_E_COMM_DATA_LOST: the freshly activated card drops the
+	// first exchanges, a transient failure of the earliest transmit
+	// attempts. The counter is shared with the pinning exchanges of
+	// the unit probe, which send the same UID APDU.
+	FailUIDProbes int
 }
 
 type card struct {
@@ -148,6 +159,20 @@ func New() (*Server, error) {
 // Addr returns the Unix socket path of the fake daemon.
 func (s *Server) Addr() string {
 	return s.path
+}
+
+// Reader returns the state of the named fake reader, creating it when
+// it does not exist yet, so a test can configure a reader (failure
+// injection, attributes) before or after inserting a card.
+func (s *Server) Reader(name string) *Reader {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.readers[name]
+	if !ok {
+		r = &Reader{}
+		s.readers[name] = r
+	}
+	return r
 }
 
 // InsertCard creates the reader if needed and inserts a card with the
@@ -453,6 +478,11 @@ func (s *Server) connect(conn net.Conn, body []byte) error {
 	s.mu.Lock()
 	r, known := s.readers[name]
 	isPresent := known && r.Present
+	if isPresent && r.FailConnects > 0 {
+		// The card is reported present before its activation settled.
+		r.FailConnects--
+		isPresent = false
+	}
 	handle := uint32(0)
 	if isPresent {
 		s.handles++
@@ -489,9 +519,16 @@ func (s *Server) transmit(conn net.Conn, body []byte) error {
 	s.mu.Lock()
 	var uid []byte
 	known := false
+	flake := false
 	if c, ok := s.cards[cardHandle]; ok {
 		known = true
-		uid = append([]byte(nil), c.reader.UID...)
+		if c.reader.FailUIDProbes > 0 {
+			// The freshly activated card drops the exchange.
+			c.reader.FailUIDProbes--
+			flake = true
+		} else {
+			uid = append([]byte(nil), c.reader.UID...)
+		}
 	}
 	s.mu.Unlock()
 	var resp []byte
@@ -501,6 +538,8 @@ func (s *Server) transmit(conn net.Conn, body []byte) error {
 	switch {
 	case !known:
 		rv = errInvalidHandle
+	case flake:
+		rv = errCommDataLost
 	case isUIDProbe:
 		if uid == nil {
 			resp = []byte{0x63, 0x00} // uid not available
