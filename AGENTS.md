@@ -60,13 +60,18 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   UID from the `FF CA 00 00 00` GET DATA pseudo-APDU; ATR is the
   fallback (`Card.Source`: `uid` / `atr`). Random UIDs (ISO 14443-3:
   4 bytes starting `0x08`, new per activation) identify nothing →
-  ATR fallback. The UID read insists (`uidReadAttempts`,
-  `uidReadDelay` in `uid.go`): pcscd reports a card present before
-  its activation settled, so the first connect (`openCard`) and the
-  first exchanges (`transmitUID`) can fail transiently; both are
-  retried, only the random UID or an exhausted attempt budget falls
-  back to the ATR. A single shot probe here was the root cause of the
-  intermittent atr misidentification of cards with a valid UID.
+  ATR fallback. The UID read insists (`uidReadRounds` rounds over
+  `uidReadAttempts` exchanges each, `uidReadDelay` pauses, all in
+  `uid.go` `insistUID`): pcscd reports a card present before its
+  activation settled, and a contactless reader (ACR122U family,
+  observed as `63 00`) can wedge the freshly activated PICC into a
+  state its firmware cannot serve, sticking for the whole connection.
+  Every failed round resets the card (`SCARD_RESET_CARD`, the power
+  cycle rerunning the anti collision) and reopens the connection;
+  only a valid UID, a random UID or an exhausted budget ends the
+  insistence. Single shot / same-connection-only retries here were
+  the root cause of the intermittent atr misidentification of cards
+  with a valid UID.
 - **Reader tags** `xx-xxxx-xx` hash the normalized reader name
   (`normalizeReaderName` strips volatile hotplug index groups). Tiers,
   best first: hardware serial (`SCARD_ATTR_VENDOR_IFD_SERIAL_NO`,
@@ -197,4 +202,6 @@ the watch loop, which probes them immediately. `fake.Reader(name)`
 returns the live reader state for failure injection
 (`FailConnects`, `FailUIDProbes` answer SCARD_E_NO_SMARTCARD /
 SCARD_E_COMM_DATA_LOST for the next n attempts, the transient
-activation race of a freshly inserted card).
+activation race of a freshly inserted card; `StuckUID` wedges the
+PICC with 63 00 for the whole connection, only a SCARD_RESET_CARD
+disconnect cures it, exactly the ACR122U failure).

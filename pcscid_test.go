@@ -473,6 +473,39 @@ func TestWatchStillFallsBackToATRWhenUIDNeverComes(t *testing.T) {
 	}
 }
 
+// TestWatchUIDRecoversThroughCardReset reproduces the intermittent atr
+// misidentification of the ACR122U family: the reader answers the UID
+// pseudo APDU with 63 00 while the freshly activated PICC sits in a
+// state its firmware cannot serve, and that state sticks for every
+// exchange on the same connection. No same connection retry clears it,
+// only a card reset (SCARD_RESET_CARD, the power cycle that reruns the
+// anti collision) does. The identification must reset the card and
+// still report the uid derived btag, never silently degrade to the
+// type level ATR identity.
+func TestWatchUIDRecoversThroughCardReset(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.InsertCard("R", mifareATR, uid)
+	fake.Reader("R").StuckUID = true
+
+	ev := receiveEvent(t, events, 5*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.Card.Source != "uid" {
+		t.Errorf("source = %q, want uid: a wedged picc must be cured by a card reset, not degraded to the atr", ev.Card.Source)
+	}
+	if ev.Card.ID != Btag("mifare classic 1k", uid) {
+		t.Errorf("id = %q, want the uid derived btag %q", ev.Card.ID, Btag("mifare classic 1k", uid))
+	}
+	if !slices.Equal(ev.Card.UID, uid) {
+		t.Errorf("uid = % X, want % X", ev.Card.UID, uid)
+	}
+}
+
 func TestWatchNoRepeatWithoutChange(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)

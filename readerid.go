@@ -139,17 +139,25 @@ func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 		}
 		return readerFacts{}
 	}
+	// live tracks the card connection the probe currently holds: the
+	// UID insistence (insistUID) may reset the card and reopen the
+	// connection, intermediate handles are already disconnected there,
+	// the deferred teardown must hit the final one.
+	live := card
 	defer func() {
-		if err := card.Disconnect(pcsc.LeaveCard); err != nil {
+		if live == nil {
+			return
+		}
+		if err := live.Disconnect(pcsc.LeaveCard); err != nil {
 			lg.Debug("reader unit probe disconnect failed", "reader", reader, "error", err)
 		}
 	}()
 
 	var facts readerFacts
 	var reasons []string
-	facts.serial = readVendorSerial(card, lg, reader)
+	facts.serial = readVendorSerial(live, lg, reader)
 	if facts.serial == "" && useUSBPath {
-		if bus, dev, reason := readChannelID(card, lg, reader); reason == "" {
+		if bus, dev, reason := readChannelID(live, lg, reader); reason == "" {
 			port, portReason := usbPortPath(lg, sysfsRoot, bus, dev)
 			if port != "" {
 				facts.port = portIdentity(reader, port)
@@ -164,18 +172,23 @@ func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 	} else if facts.serial == "" {
 		lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
 	}
-	// The card identity exchange. It doubles as guaranteed USB traffic
-	// of the probe window: a plain card connection submits no URB at
-	// all (the daemon already powered the card, both attribute answers
-	// come from driver memory), so the UID round trip is what moves the
+	// The card identity exchange, insisted on across card resets (a
+	// wedged PICC answers 63 00 on the whole connection, only a power
+	// cycle clears it). It doubles as guaranteed USB traffic of the
+	// probe window: a plain card connection submits no URB at all (the
+	// daemon already powered the card, both attribute answers come
+	// from driver memory), so the UID round trips are what move the
 	// sysfs urbnum counter of the probed device.
-	facts.uid, facts.protocol = transmitUID(card, lg, reader)
+	facts.uid, facts.protocol, live = insistUID(cl, live, lg, reader)
 	if useUSBPath && facts.serial == "" && facts.port == "" {
 		// Strengthen the traffic signal of the probe window before
 		// the correlation reads it: every exchange is another burst
 		// of URBs to exactly this unit.
 		for range pinningExchanges {
-			if _, err := card.Transmit(uidAPDU, 64); err != nil {
+			if live == nil {
+				break
+			}
+			if _, err := live.Transmit(uidAPDU, 64); err != nil {
 				lg.Debug("reader usb traffic pinning exchange failed", "reader", reader, "error", err)
 			}
 		}

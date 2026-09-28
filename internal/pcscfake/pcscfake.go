@@ -59,6 +59,8 @@ const (
 
 	uidProbeA byte = 0xFF // FF CA 00 00 00, PC/SC part 3 GET DATA UID
 	uidProbeB byte = 0xCA
+
+	resetCard uint32 = 0x0001 // SCARD_RESET_CARD disposition
 )
 
 const readerStateWireSz = 184
@@ -121,6 +123,13 @@ type Reader struct {
 	// attempts. The counter is shared with the pinning exchanges of
 	// the unit probe, which send the same UID APDU.
 	FailUIDProbes int
+	// StuckUID models a wedged PICC: every UID probe answers 63 00,
+	// like a contactless reader whose freshly activated card sits in
+	// a state its firmware cannot serve, and where that state sticks
+	// for the whole card connection. A card reset (a SCARD_RESET_CARD
+	// disconnect, the power cycle that reruns the anti collision)
+	// clears it.
+	StuckUID bool
 }
 
 type card struct {
@@ -407,8 +416,15 @@ func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool
 		if len(body) != 12 {
 			return true, fmt.Errorf("pcscfake: disconnect body %d bytes, want 12", len(body))
 		}
+		handle := binary.LittleEndian.Uint32(body[0:4])
+		disposition := binary.LittleEndian.Uint32(body[4:8])
 		s.mu.Lock()
-		delete(s.cards, binary.LittleEndian.Uint32(body[0:4]))
+		if c, ok := s.cards[handle]; ok && disposition == resetCard {
+			// The card reset powers the card down and up, the anti
+			// collision reruns: the wedged PICC state clears.
+			c.reader.StuckUID = false
+		}
+		delete(s.cards, handle)
 		s.mu.Unlock()
 		_, err := conn.Write(body)
 		return false, err
@@ -520,13 +536,17 @@ func (s *Server) transmit(conn net.Conn, body []byte) error {
 	var uid []byte
 	known := false
 	flake := false
+	stuck := false
 	if c, ok := s.cards[cardHandle]; ok {
 		known = true
-		if c.reader.FailUIDProbes > 0 {
+		switch {
+		case c.reader.FailUIDProbes > 0:
 			// The freshly activated card drops the exchange.
 			c.reader.FailUIDProbes--
 			flake = true
-		} else {
+		case c.reader.StuckUID:
+			stuck = true
+		default:
 			uid = append([]byte(nil), c.reader.UID...)
 		}
 	}
@@ -541,8 +561,8 @@ func (s *Server) transmit(conn net.Conn, body []byte) error {
 	case flake:
 		rv = errCommDataLost
 	case isUIDProbe:
-		if uid == nil {
-			resp = []byte{0x63, 0x00} // uid not available
+		if uid == nil || stuck {
+			resp = []byte{0x63, 0x00} // uid not available, or the picc is wedged
 		} else {
 			resp = append(uid, 0x90, 0x00)
 		}
