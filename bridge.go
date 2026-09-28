@@ -49,6 +49,9 @@ const (
 	// reader+card pairs the stale entries are pruned, so a kiosk serving
 	// many different cards for weeks cannot leak.
 	bridgeDedupMax = 1024
+	// bridgeHeartbeat pings the SSE stream so intermediaries keep an
+	// idle connection open.
+	bridgeHeartbeat = 20 * time.Second
 	// bridgeReadHeaderTimeout bounds an HTTP request head, a guard
 	// against slowloris style stalls of the single bridge listener.
 	bridgeReadHeaderTimeout = 10 * time.Second
@@ -193,7 +196,7 @@ func (b *Bridge) Handler() http.Handler {
 		fmt.Fprintf(w, "event: hello\ndata: {\"version\":%q}\n\n", Version())
 		flusher.Flush()
 		// Heartbeat so intermediaries keep the stream alive.
-		heartbeat := time.NewTicker(20 * time.Second)
+		heartbeat := time.NewTicker(bridgeHeartbeat)
 		defer heartbeat.Stop()
 		for {
 			select {

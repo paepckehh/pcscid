@@ -641,13 +641,13 @@ func (s *Server) getAttrib(conn net.Conn, body []byte) error {
 	known := false
 	if c, ok := s.cards[cardHandle]; ok {
 		known = true
-		switch {
-		case attrID == attrVendorIFDSerialNo:
+		switch attrID {
+		case attrVendorIFDSerialNo:
 			c.reader.AttribProbes++
 			if c.reader.Serial != "" {
 				value = []byte(c.reader.Serial)
 			}
-		case attrID == attrChannelID:
+		case attrChannelID:
 			c.reader.AttribProbes++
 			if c.reader.ChannelID != 0 {
 				value = make([]byte, 4)

@@ -11,6 +11,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -101,7 +102,7 @@ func (s *Signer) Sign(msg []byte) string {
 
 	var out []byte
 	out = append(out, sshsigMagic...)
-	out = append(out, byte(sshsigVersion>>24), byte(sshsigVersion>>16), byte(sshsigVersion>>8), byte(sshsigVersion))
+	out = binary.BigEndian.AppendUint32(out, sshsigVersion)
 	out = appendSSHString(out, public)
 	out = appendSSHString(out, []byte(sshsigNamespace))
 	out = appendSSHString(out, nil)
@@ -236,7 +237,7 @@ func (r *sshReader) bytes(n int) []byte {
 
 func (r *sshReader) uint32() uint32 {
 	if b := r.bytes(4); b != nil {
-		return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+		return binary.BigEndian.Uint32(b)
 	}
 	return 0
 }
@@ -256,11 +257,6 @@ func (r *sshReader) sshString() []byte {
 // appendSSHString appends s in SSH wire format: uint32 length prefix
 // then the bytes.
 func appendSSHString(dst, s []byte) []byte {
-	var length [4]byte
-	length[0] = byte(len(s) >> 24)
-	length[1] = byte(len(s) >> 16)
-	length[2] = byte(len(s) >> 8)
-	length[3] = byte(len(s))
-	dst = append(dst, length[:]...)
+	dst = binary.BigEndian.AppendUint32(dst, uint32(len(s)))
 	return append(dst, s...)
 }

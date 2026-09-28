@@ -172,11 +172,11 @@ Worked examples against a running bridge:
 
 ```console
 $ curl http://127.0.0.1:8976/health
-{"ok":true,"version":"v0.0.141"}
+{"ok":true,"version":"v0.0.161"}
 
 $ curl -N http://127.0.0.1:8976/events
 event: hello
-data: {"version":"v0.0.141"}
+data: {"version":"v0.0.161"}
 
 : keep-alive
 
@@ -278,7 +278,7 @@ cmd/pcscid ──▶ pcscid.Watch ──▶ pcsc.Client ──▶ /run/pcscd/pcs
 1. `pcsc.Client` performs the header-less version handshake (claims 4.4, adopts 4.5 when pcscd 2.x offers it, down-negotiates for old daemons), establishes a context and fetches the 16-entry `READER_STATE` array — reader names, presence bits, event counters, ATRs.
 2. Card insertions (presence bit plus event counter change) trigger identification: connect in shared mode, negotiate T=0/T=1, transmit the UID pseudo-APDU, disconnect.
 3. The ATR yields the card type; type plus UID yields the btag. A valid UID is mandatory: when the UID read fails after its full retry and card-reset budget, or the card serves an ISO/IEC 14443-3 random UID, the presentation is skipped — no insertion event, no output line, silently in normal mode and fully traced under `DEBUG=1`.
-4. Reader state waits are bounded at a 1 s tick; timeouts are client-side and unblock the daemon through the stop request, so the stream stays in sync. Context cancellation closes the socket for an instant exit. With no reader registered the daemon answers the wait immediately — the loop polls gently instead of spinning.
+4. Reader state waits are bounded at a 250 ms tick; timeouts are client-side and unblock the daemon through the stop request, so the stream stays in sync. Context cancellation closes the socket for an instant exit. With no reader registered the daemon answers the wait immediately — the loop polls gently instead of spinning.
 
 The empirical protocol gotchas (header-less responses, the unframed APDU bytes of `CMD_TRANSMIT`, the registration dump that is *not* a change signal) are documented in the code and covered by tests against both daemon generations.
 

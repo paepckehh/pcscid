@@ -77,7 +77,7 @@ func ParseATR(b []byte) (ATR, error) {
 	if pos+historicalCount > len(b) {
 		return ATR{}, fmt.Errorf("pcscid: truncated atr: expected %d historical bytes, %d left", historicalCount, len(b)-pos)
 	}
-	historical := append([]byte(nil), b[pos:pos+historicalCount]...)
+	historical := slices.Clone(b[pos : pos+historicalCount])
 	pos += historicalCount
 
 	var tck byte

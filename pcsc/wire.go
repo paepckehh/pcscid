@@ -65,6 +65,16 @@ func readRaw(r io.Reader, size int) ([]byte, error) {
 	return buf, nil
 }
 
+// packLE encodes the uint32 fields of a fixed-layout message body
+// as consecutive little endian words, one 4 byte slot per field.
+func packLE(fields ...uint32) []byte {
+	buf := make([]byte, 4*len(fields))
+	for i, field := range fields {
+		binary.LittleEndian.PutUint32(buf[4*i:], field)
+	}
+	return buf
+}
+
 // versionMsg is struct version_struct: 12 bytes on the wire.
 type versionMsg struct {
 	major uint32
@@ -73,11 +83,7 @@ type versionMsg struct {
 }
 
 func encodeVersion(v versionMsg) []byte {
-	buf := make([]byte, 12)
-	binary.LittleEndian.PutUint32(buf[0:], v.major)
-	binary.LittleEndian.PutUint32(buf[4:], v.minor)
-	binary.LittleEndian.PutUint32(buf[8:], v.rv)
-	return buf
+	return packLE(v.major, v.minor, v.rv)
 }
 
 func decodeVersion(b []byte) versionMsg {
@@ -96,11 +102,7 @@ type establishMsg struct {
 }
 
 func encodeEstablish(e establishMsg) []byte {
-	buf := make([]byte, 12)
-	binary.LittleEndian.PutUint32(buf[0:], e.scope)
-	binary.LittleEndian.PutUint32(buf[4:], e.context)
-	binary.LittleEndian.PutUint32(buf[8:], e.rv)
-	return buf
+	return packLE(e.scope, e.context, e.rv)
 }
 
 func decodeEstablish(b []byte) establishMsg {
@@ -118,10 +120,7 @@ type releaseMsg struct {
 }
 
 func encodeRelease(r releaseMsg) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint32(buf[0:], r.context)
-	binary.LittleEndian.PutUint32(buf[4:], r.rv)
-	return buf
+	return packLE(r.context, r.rv)
 }
 
 func decodeRelease(b []byte) releaseMsg {
@@ -178,11 +177,7 @@ type disconnectMsg struct {
 }
 
 func encodeDisconnect(d disconnectMsg) []byte {
-	buf := make([]byte, 12)
-	binary.LittleEndian.PutUint32(buf[0:], d.card)
-	binary.LittleEndian.PutUint32(buf[4:], d.disposition)
-	binary.LittleEndian.PutUint32(buf[8:], d.rv)
-	return buf
+	return packLE(d.card, d.disposition, d.rv)
 }
 
 func decodeDisconnect(b []byte) disconnectMsg {
@@ -206,16 +201,15 @@ type transmitMsg struct {
 }
 
 func encodeTransmit(t transmitMsg) []byte {
-	buf := make([]byte, 32)
-	binary.LittleEndian.PutUint32(buf[0:], t.card)
-	binary.LittleEndian.PutUint32(buf[4:], t.sendPciProto)
-	binary.LittleEndian.PutUint32(buf[8:], t.sendPciLen)
-	binary.LittleEndian.PutUint32(buf[12:], t.sendLength)
-	binary.LittleEndian.PutUint32(buf[16:], t.recvPciProto)
-	binary.LittleEndian.PutUint32(buf[20:], t.recvPciLen)
-	binary.LittleEndian.PutUint32(buf[24:], t.recvLength)
-	binary.LittleEndian.PutUint32(buf[28:], t.rv)
-	return buf
+	return packLE(
+		t.card,
+		t.sendPciProto,
+		t.sendPciLen,
+		t.sendLength,
+		t.recvPciProto,
+		t.recvPciLen,
+		t.recvLength,
+		t.rv)
 }
 
 func decodeTransmit(b []byte) transmitMsg {
@@ -279,10 +273,7 @@ type waitMsg struct {
 }
 
 func encodeWait(w waitMsg) []byte {
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint32(buf[0:], w.timeoutMS)
-	binary.LittleEndian.PutUint32(buf[4:], w.rv)
-	return buf
+	return packLE(w.timeoutMS, w.rv)
 }
 
 func decodeWait(b []byte) waitMsg {

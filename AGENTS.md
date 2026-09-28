@@ -51,46 +51,50 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   `PCSCLITE_CSOCK_NAME` overrides; `Options.SocketPath` / `pcsc.New`
   take an explicit path (tests feed the fake's `Server.Addr()`).
 
-## Identity model (short form)
+## Identity model
 
-- **Btag** `Btag(cardType, tag)` =
+### Btag — card identity
+
+- `Btag(cardType, tag)` =
   `alnum(SHA-256("pcscid/v1|"+card-type+"|"+uid)[:10])`,
   `xxx-xxx-xxxx`, digits and lowercase only. Pure function of card
   type + tag: same card, same btag on every machine, socket, reader.
-  UID from the `FF CA 00 00 00` GET DATA pseudo-APDU. A btag ALWAYS
+- UID from the `FF CA 00 00 00` GET DATA pseudo-APDU. A btag ALWAYS
   needs a valid UID (`Card.Source`: `uid` / `none`): a failed UID
   read or a random UID (ISO 14443-3: 4 bytes starting `0x08`, new
   per activation, identifies nothing) yields NO insertion event at
   all, never an ATR derived type level btag. The skip is silent in
   normal mode, `DEBUG=1` keeps every detail (per-attempt trace plus
   one summary record with reader, tag facts, type, uid, atr,
-  protocol). The UID read insists (`uidReadRounds` rounds over
-  `uidReadAttempts` exchanges each, `uidReadDelay` pauses, all in
-  `uid.go` `insistUID`): pcscd reports a card present before its
-  activation settled, and a contactless reader (ACR122U family,
-  observed as `63 00`) can wedge the freshly activated PICC into a
-  state its firmware cannot serve, sticking for the whole connection.
-  Every failed round resets the card (`SCARD_RESET_CARD`, the power
-  cycle rerunning the anti collision) and reopens the connection;
-  only a valid UID, a random UID or an exhausted budget ends the
-  insistence. Single shot / same-connection-only retries here were
-  the root cause of the intermittent atr misidentification of cards
-  with a valid UID. **The reopen after a reset has its own generous
-  budget** (`reopenCardAfterReset`, NOT the short `openCard` window):
-  the reader needs its anti collision rerun and several field poll
-  cycles before it reports the reset card present again, and every
-  reconnect racing that reactivation answers `SCARD_E_NO_SMARTCARD`
-  although the card never left — the observed ACR122U no-btag failure
-  (the old 3×60 ms reopen gave up on a still presented card). Budget:
+  protocol).
+- **UID read insistence** (`uid.go` `insistUID`): pcscd reports a
+  card present before its activation settled, and a contactless
+  reader (ACR122U family, observed as `63 00`) can wedge the freshly
+  activated PICC into a state its firmware cannot serve, sticking for
+  the whole connection. The read loop runs `uidReadRounds` rounds of
+  `uidReadAttempts` exchanges, `uidReadDelay` pauses between them. A
+  `63 00` answer is NOT retried (the wedge sticks, retries only burn
+  the presence window): every failed round resets the card
+  (`SCARD_RESET_CARD`, the power cycle reruns the anti collision) and
+  reopens the connection; only a valid UID, a random UID or an
+  exhausted budget ends the insistence. Single shot /
+  same-connection-only retries here were the root cause of the
+  intermittent atr misidentification of cards with a valid UID.
+  Transport errors during the activation settle ARE still retried.
+- **The reopen after a reset has its own generous budget**
+  (`reopenCardAfterReset`, NOT the short `openCard` window): the
+  reader needs its anti collision rerun and several field poll cycles
+  before it reports the reset card present again, and every reconnect
+  racing that reactivation answers `SCARD_E_NO_SMARTCARD` although
+  the card never left — the observed ACR122U no-btag failure (the old
+  3×60 ms reopen gave up on a still presented card). Budget:
   `resetReopenSettle` 100 ms before the first attempt, then up to
   `resetReopenAttempts` 8 reconnects `resetReopenDelay` 150 ms apart;
-  every failed attempt is traced at debug level
-  (`TestWatchUIDRecoversWhenResetReactivationLags` pins it against the
-  fake's `FailResetReconnects` reactivation lag).
-  **Regression net** (`pcscid_test.go`, never weaken or remove):
+  every failed attempt is traced at debug level.
+- **Regression net** (`pcscid_test.go`, never weaken or remove):
   `TestWatchUIDRecoversWhenResetReactivationLags` reproduces the exact
-  production failure (lag 5 > the old 3-attempt budget; it fails on any
-  budget regression), `TestWatchUIDRecoversAtReopenBudgetBoundary`
+  production failure (lag 5 > the old 3-attempt budget; it fails on
+  any budget regression), `TestWatchUIDRecoversAtReopenBudgetBoundary`
   pins the budget against a lag of `resetReopenAttempts-1`,
   `TestResetReopenBudgetFloor` pins the absolute floor of the three
   constants (field calibrated), and
@@ -102,14 +106,17 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   repeated full failure paths (wedge, reset, lagging reactivation)
   yields the byte-identical btag and reader tag on every presentation,
   never an ATR derived identity.
-  **Golden identifier hashes** (`TestBtagGolden`,
+- **Golden identifier hashes** (`TestBtagGolden`,
   `TestReaderTagGolden`, `TestReaderTagUnitGolden`): the exact btag of
   a UID observed in production (`DD 5D 6C A5` mifare classic 1k →
   `w79-i3r-lmr0`) and the exact reader tags of every hash domain (v1
   model, v2 serial, v3 USB port, m1 machine mixed) are pinned — the
   tags are long lived identifiers consumers store, any digest change
   is a breaking release and must fail these tests.
-- **Reader tags** `xx-xxxx-xx` hash the normalized reader name
+
+### Reader tags — model, unit, machine
+
+- `xx-xxxx-xx` hash the normalized reader name
   (`normalizeReaderName` strips volatile hotplug index groups). Tiers,
   best first: hardware serial (`SCARD_ATTR_VENDOR_IFD_SERIAL_NO`,
   `pcscid/reader/v2`, portable), USB port path (sysfs devpath,
@@ -124,13 +131,19 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   trace marks it as such and the unit identity falls through to the
   sysfs port resolution; the sentinel is exported as
   `pcsc.ErrUnsupportedFeature`.
-- **Port resolution** (serial-less readers, opt-in): channel id
-  `SCARD_ATTR_CHANNEL_ID` packs `0x0020<<16|bus<<8|dev`, resolved via
-  sysfs (`/sys/bus/usb/devices`, busnum/devnum/devpath; entries are
-  symlinks, the resolver stats through them). Without a channel id
-  the sysfs USB tree is scanned for the reader's CCID device
-  (bInterfaceClass 0x0B, manufacturer/product strings matching the
-  reader name).
+- `Event.ReaderTag` carries the composed tag (insertions only),
+  `Event.ReaderSerial` / `Event.ReaderPort` the raw facts. An
+  unresolved port under `PCSCID_USB_PATH_ID` is reported as a
+  qualified error; the reader keeps the model tag.
+
+### Port resolution and URB correlation (serial-less readers, opt-in)
+
+- Channel id `SCARD_ATTR_CHANNEL_ID` packs `0x0020<<16|bus<<8|dev`,
+  resolved via sysfs (`/sys/bus/usb/devices`, busnum/devnum/devpath;
+  entries are symlinks, the resolver stats through them). Without a
+  channel id the sysfs USB tree is scanned for the reader's CCID
+  device (bInterfaceClass 0x0B, manufacturer/product strings matching
+  the reader name).
 - **N identical units** are told apart by their USB traffic: a plain
   card connection submits NO URBs, so the probe window (UID plus
   pinning exchanges in `probeReaderCard`) is a burst of URBs to
@@ -143,6 +156,9 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   count as the delta and win spuriously. An ambiguous correlation
   refuses with a qualified error unless every other candidate is
   already claimed (elimination).
+
+### unitRegistry — per-session identity persistence and cache
+
 - The per-session `unitRegistry` keeps the identity persistent and
   collision free: one port = one reader name, a transient probe
   failure falls back to the remembered identity (a tag cannot flip),
@@ -150,23 +166,21 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   registry (a daemon restart re-enumerates the name suffixes).
   Multi-slot units qualify the port with the slot group
   (`portIdentity`, `2-1.3#01`); slot 00 keeps the plain devpath so
-  existing tags stay stable. **Identity cache**: a reader whose serial
-  or port resolved once is never identity-probed again in the same
-  daemon session (`probeReaderCard` receives the registry's cached
-  facts, `unitRegistry.cached`): the serial/channel GetAttribs, the
-  sysfs scans and the URB snapshots/pinning run once per reader, only
-  the card UID read runs on every presentation — a USB port hosts
-  one unit and re-wiring means a restart anyway (a disappeared reader
-  is forgotten, a daemon reconnect drops the whole registry). A
-  reader still without any unit fact (model tier) keeps the full
-  identity probe on later presentations, so a late serving driver
-  can still adopt its facts
+  existing tags stay stable.
+- **Identity cache**: a reader whose serial or port resolved once is
+  never identity-probed again in the same daemon session
+  (`probeReaderCard` receives the registry's cached facts,
+  `unitRegistry.cached`): the serial/channel GetAttribs, the sysfs
+  scans and the URB snapshots/pinning run once per reader, only the
+  card UID read runs on every presentation — a USB port hosts one
+  unit and re-wiring means a restart anyway. A reader still without
+  any unit fact (model tier) keeps the full identity probe on later
+  presentations, so a late serving driver can still adopt its facts
   (`TestWatchCachesUnitIdentityBetweenPresentations`,
   `TestWatchLateFactsRecoverOnNextPresentation`).
-- `Event.ReaderTag` carries the composed tag (insertions only),
-  `Event.ReaderSerial` / `Event.ReaderPort` the raw facts. An
-  unresolved port under `PCSCID_USB_PATH_ID` is reported as a
-  qualified error; the reader keeps the model tag.
+
+### Machine identity
+
 - `MachineID()` reads `/sys/class/net`: physical ethernet ports only
   (type 1, backing `device` symlink, no `phy80211`, non-zero MAC),
   MACs sorted, joined with `|`.

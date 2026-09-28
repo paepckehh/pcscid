@@ -75,16 +75,11 @@ func run() error {
 	// level even without DEBUG, so an operator always sees the
 	// effective setup; only the verbose protocol and probe trace
 	// needs DEBUG=1. Stdout stays machine readable either way.
-	var logger *slog.Logger
+	level := slog.LevelInfo
 	if debugOn {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		}))
-	} else {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
-		}))
+		level = slog.LevelDebug
 	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	fmt.Fprintln(os.Stderr, "pcscid", pcscid.Version())
 	logger.Debug("pcscid starting", "version", pcscid.Version())
 
