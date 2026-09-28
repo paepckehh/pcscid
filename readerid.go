@@ -596,7 +596,16 @@ func usbUrbWinner(before, after map[string]uint32, candidates []string) (name st
 	}
 	winner, winnerDelta, runnerUp := "", 0, 0
 	for _, candidate := range candidates {
-		delta := int(after[candidate]) - int(before[candidate])
+		base, present := before[candidate]
+		if !present {
+			// The device did not exist at the start of the probe
+			// window: the probed reader was registered with the
+			// daemon before the wait, its device cannot be this
+			// one. A mid window hotplug would answer its whole
+			// urbnum history as the delta and win spuriously.
+			continue
+		}
+		delta := int(after[candidate]) - int(base)
 		switch {
 		case delta > winnerDelta:
 			runnerUp = winnerDelta

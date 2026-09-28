@@ -38,6 +38,28 @@ func TestClientVersion(t *testing.T) {
 	}
 }
 
+// TestSocketCandidates pins the dial order: an explicit path wins,
+// PCSCLITE_CSOCK_NAME overrides the platform defaults, and without
+// either the default sockets are tried in order. It cannot run in
+// parallel, it mutates the process environment.
+func TestSocketCandidates(t *testing.T) {
+	if got := socketCandidates("/explicit/pcscd.comm"); len(got) != 1 || got[0] != "/explicit/pcscd.comm" {
+		t.Errorf("explicit path = %v, want [/explicit/pcscd.comm]", got)
+	}
+	t.Setenv("PCSCLITE_CSOCK_NAME", "/env/pcscd.comm")
+	if got := socketCandidates(""); len(got) != 1 || got[0] != "/env/pcscd.comm" {
+		t.Errorf("env override = %v, want [/env/pcscd.comm]", got)
+	}
+	if got := socketCandidates("/explicit/pcscd.comm"); len(got) != 1 || got[0] != "/explicit/pcscd.comm" {
+		t.Errorf("explicit path over env = %v, want [/explicit/pcscd.comm]", got)
+	}
+	t.Setenv("PCSCLITE_CSOCK_NAME", "")
+	got := socketCandidates("")
+	if !slices.Equal(got, defaultSockets) {
+		t.Errorf("defaults = %v, want %v in order", got, defaultSockets)
+	}
+}
+
 func TestClientVersionDowngrade(t *testing.T) {
 	t.Parallel()
 	fake, err := pcscfake.New()

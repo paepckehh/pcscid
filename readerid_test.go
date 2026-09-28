@@ -676,6 +676,113 @@ func TestUnitRegistryAdopt(t *testing.T) {
 	}
 }
 
+// TestUsbUrbWinner pins the traffic correlation arithmetic: the
+// counter that clearly moved the most identifies the unit, ties,
+// noise level deltas and missing margins refuse, and a candidate that
+// did not exist at the start of the probe window is ineligible — its
+// whole urbnum history would pose as the delta and a mid-window
+// hotplug would win the correlation spuriously.
+func TestUsbUrbWinner(t *testing.T) {
+	t.Parallel()
+	const devA, devB = "2-1", "2-2"
+	cases := []struct {
+		name   string
+		before map[string]uint32
+		after  map[string]uint32
+		cands  []string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "clear winner",
+			before: map[string]uint32{devA: 100, devB: 100},
+			after:  map[string]uint32{devA: 112, devB: 101},
+			cands:  []string{devA, devB},
+			want:   devA,
+			wantOK: true,
+		},
+		{
+			name:   "tie refuses",
+			before: map[string]uint32{devA: 100, devB: 100},
+			after:  map[string]uint32{devA: 110, devB: 110},
+			cands:  []string{devA, devB},
+		},
+		{
+			name:   "delta below the minimum refuses",
+			before: map[string]uint32{devA: 100},
+			after:  map[string]uint32{devA: 101},
+			cands:  []string{devA},
+		},
+		{
+			name:   "winner without the margin refuses",
+			before: map[string]uint32{devA: 100, devB: 100},
+			after:  map[string]uint32{devA: 112, devB: 111},
+			cands:  []string{devA, devB},
+		},
+		{
+			name:   "candidate missing from the before snapshot is ineligible",
+			before: map[string]uint32{devA: 100},
+			after:  map[string]uint32{devA: 101, devB: 500},
+			cands:  []string{devA, devB},
+		},
+		{
+			name:  "nil snapshots refuse",
+			after: map[string]uint32{devA: 500},
+			cands: []string{devA},
+		},
+	}
+	for _, tc := range cases {
+		got, ok := usbUrbWinner(tc.before, tc.after, tc.cands)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("%s: usbUrbWinner = (%q, %v), want (%q, %v)",
+				tc.name, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
+// TestWatchLateFactsRecoverOnNextPresentation pins the recovery from a
+// probe that lost the race against its own setup: the first
+// presentation probes no serial (the driver answers nothing yet, like
+// a test configuring the facts after the card, or a driver warming
+// up), the event degrades to the model tag for that one presentation,
+// and the next presentation adopts the now readable serial and its
+// unit tier tag. One lost race must not pin the reader to the model
+// tag forever.
+func TestWatchLateFactsRecoverOnNextPresentation(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	// First presentation without any served serial.
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	first := receiveEvent(t, events, 3*time.Second)
+	if first.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", first.Kind)
+	}
+	if first.ReaderSerial != "" || first.ReaderTag != ReaderTag(first.Reader) {
+		t.Fatalf("first event = serial %q tag %q, want the model tag degradation",
+			first.ReaderSerial, first.ReaderTag)
+	}
+
+	// The serial becomes readable; a re-presentation must adopt it.
+	fake.SetSerial("ACS ACR122U 01 00 00", "A001")
+	fake.RemoveCard("ACS ACR122U 01 00 00")
+	if ev := receiveEvent(t, events, 3*time.Second); ev.Kind != KindRemove {
+		t.Fatalf("kind = %v, want remove", ev.Kind)
+	}
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	second := receiveEvent(t, events, 3*time.Second)
+	if second.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", second.Kind)
+	}
+	if second.ReaderSerial != "A001" {
+		t.Errorf("second event serial = %q, want A001 adopted after the late probe", second.ReaderSerial)
+	}
+	if want := ReaderTagWithSerial(second.Reader, "A001"); second.ReaderTag != want {
+		t.Errorf("second event tag = %q, want the serial tier tag %q", second.ReaderTag, want)
+	}
+}
+
 // TestWatchReportsUnresolvedPort pins the qualified error: with
 // USBPathID enabled and neither the channel id nor the sysfs device
 // scan resolving a port, the probe logs an error naming the reasons
