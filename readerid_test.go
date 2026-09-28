@@ -178,12 +178,14 @@ func TestWatchIdentifiesIdenticalReadersByPort(t *testing.T) {
 
 	uidA := []byte{0x04, 0x11, 0x22, 0x33}
 	uidB := []byte{0x04, 0xAA, 0xBB, 0xCC}
-	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, uidA)
+	// The unit facts must exist before the card: InsertCard wakes the
+	// watch loop, which probes them immediately.
 	fake.SetSerial("ACS ACR122U 01 00 00", "0") // vendor placeholder
 	fake.SetChannelID("ACS ACR122U 01 00 00", 0x00200122)
-	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, uidB)
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, uidA)
 	fake.SetSerial("ACS ACR122U 02 00 00", "0000000000")
 	fake.SetChannelID("ACS ACR122U 02 00 00", 0x00200233)
+	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, uidB)
 
 	first := receiveEvent(t, events, 3*time.Second)
 	if first.Kind != KindInsert {
@@ -848,12 +850,14 @@ func TestWatchMACIDScopesReadersToTheMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	// The unit facts must exist before the card: InsertCard wakes the
+	// watch loop, which probes them immediately.
 	fake.SetSerial("ACS ACR122U 01 00 00", "0")
 	fake.SetChannelID("ACS ACR122U 01 00 00", 0x00200122)
-	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, []byte{0x04, 0xAA, 0xBB, 0xCC})
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
 	fake.SetSerial("ACS ACR122U 02 00 00", "0")
 	fake.SetChannelID("ACS ACR122U 02 00 00", 0x00200233)
+	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, []byte{0x04, 0xAA, 0xBB, 0xCC})
 
 	first := receiveEvent(t, events, 3*time.Second)
 	if first.Kind != KindInsert {

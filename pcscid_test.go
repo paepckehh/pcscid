@@ -245,11 +245,13 @@ func TestWatchIdentifiesIdenticalReadersBySerial(t *testing.T) {
 	events, _ := watchFake(t, fake)
 
 	uid := []byte{0x04, 0x11, 0x22, 0x33}
-	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, uid)
+	// The unit facts must exist before the card: InsertCard wakes the
+	// watch loop, which probes them immediately.
 	fake.SetSerial("ACS ACR122U 01 00 00", "A001")
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, uid)
 	uidB := []byte{0x04, 0xAA, 0xBB, 0xCC}
-	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, uidB)
 	fake.SetSerial("ACS ACR122U 02 00 00", "B002")
+	fake.InsertCard("ACS ACR122U 02 00 00", mifareATR, uidB)
 
 	first := receiveEvent(t, events, 3*time.Second)
 	if first.Kind != KindInsert {

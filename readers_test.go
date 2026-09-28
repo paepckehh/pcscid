@@ -102,8 +102,10 @@ func TestIdentifyReadersMatchesWatchEvents(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
 	events, _ := watchFake(t, fake)
-	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+	// The serial must exist before the card: InsertCard wakes the watch
+	// loop, which probes it immediately.
 	fake.SetSerial("ACS ACR122U 01 00 00", "A001")
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
 	ev := receiveEvent(t, events, 3*time.Second)
 
 	readers, err := IdentifyReaders(&Options{SocketPath: fake.Addr(), Logger: discardLogger()})
@@ -258,9 +260,11 @@ func TestIdentifyReadersIdenticalUnitsUniqueTags(t *testing.T) {
 	}
 	eventTags := make(map[string]string)
 	for reader, channel := range wiring {
-		fake.InsertCard(reader, mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
+		// The channel id must exist before the card: InsertCard wakes
+		// the watch loop, which probes it immediately.
 		fake.SetSerial(reader, "0")
 		fake.SetChannelID(reader, channel)
+		fake.InsertCard(reader, mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
 		ev := receiveEvent(t, events, 5*time.Second)
 		if ev.Kind != KindInsert {
 			t.Fatalf("kind = %v, want insert", ev.Kind)

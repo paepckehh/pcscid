@@ -532,9 +532,10 @@ func (s *Server) transmit(conn net.Conn, body []byte) error {
 
 // getAttrib answers a SCARD_GET_ATTRIB request with the raw 280 byte
 // getset struct, the value embedded in the fixed buffer like the real
-// daemon does. Only the vendor serial attribute is served, everything
-// else answers the unsupported feature error, like a driver without
-// that capability.
+// daemon does. The vendor serial and the channel id attributes are
+// served when the reader carries a value for them, everything else
+// answers the unsupported feature error, like a driver without that
+// capability.
 func (s *Server) getAttrib(conn net.Conn, body []byte) error {
 	cardHandle := binary.LittleEndian.Uint32(body[0:4])
 	attrID := binary.LittleEndian.Uint32(body[4:8])
