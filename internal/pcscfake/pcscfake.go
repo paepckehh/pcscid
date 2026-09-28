@@ -135,6 +135,23 @@ type Reader struct {
 	// and then resets the card: 63 00 sticks, no same connection retry
 	// can clear it.
 	UIDProbes int
+	// AttribProbes counts the serial and channel id GetAttrib requests
+	// answered for this reader: the unit identity exchanges a
+	// presentation probing costs. A client that caches the identity
+	// asks once per session, one that re-probes every presentation
+	// burns two requests on each of them.
+	AttribProbes int
+	// FailResetReconnects makes the next n connects AFTER a card reset
+	// disconnect answer SCARD_E_NO_SMARTCARD: the reader needs its anti
+	// collision rerun before it reports the reset card present again,
+	// the reactivation lag of the power cycle. Unlike FailConnects it
+	// only applies to the reconnects of the post reset window, the
+	// initial connect of the presentation stays unaffected.
+	FailResetReconnects int
+	// resetLag marks a reader whose last card disconnect reset the
+	// card: the next connects race the anti collision rerun until one
+	// of them succeeds.
+	resetLag bool
 }
 
 type card struct {
@@ -426,8 +443,10 @@ func (s *Server) dispatch(conn net.Conn, command uint32, body []byte) (done bool
 		s.mu.Lock()
 		if c, ok := s.cards[handle]; ok && disposition == resetCard {
 			// The card reset powers the card down and up, the anti
-			// collision reruns: the wedged PICC state clears.
+			// collision reruns: the wedged PICC state clears, and the
+			// reactivation lag of the rerun begins.
 			c.reader.StuckUID = false
+			c.reader.resetLag = true
 		}
 		delete(s.cards, handle)
 		s.mu.Unlock()
@@ -503,6 +522,15 @@ func (s *Server) connect(conn net.Conn, body []byte) error {
 		// The card is reported present before its activation settled.
 		r.FailConnects--
 		isPresent = false
+	}
+	if isPresent && r.resetLag && r.FailResetReconnects > 0 {
+		// The reset card is present but the anti collision rerun of
+		// the power cycle has not reported it back yet.
+		r.FailResetReconnects--
+		isPresent = false
+	}
+	if isPresent {
+		r.resetLag = false
 	}
 	handle := uint32(0)
 	if isPresent {
@@ -610,11 +638,17 @@ func (s *Server) getAttrib(conn net.Conn, body []byte) error {
 	if c, ok := s.cards[cardHandle]; ok {
 		known = true
 		switch {
-		case attrID == attrVendorIFDSerialNo && c.reader.Serial != "":
-			value = []byte(c.reader.Serial)
-		case attrID == attrChannelID && c.reader.ChannelID != 0:
-			value = make([]byte, 4)
-			binary.LittleEndian.PutUint32(value, c.reader.ChannelID)
+		case attrID == attrVendorIFDSerialNo:
+			c.reader.AttribProbes++
+			if c.reader.Serial != "" {
+				value = []byte(c.reader.Serial)
+			}
+		case attrID == attrChannelID:
+			c.reader.AttribProbes++
+			if c.reader.ChannelID != 0 {
+				value = make([]byte, 4)
+				binary.LittleEndian.PutUint32(value, c.reader.ChannelID)
+			}
 		}
 	}
 	s.mu.Unlock()

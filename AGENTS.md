@@ -75,7 +75,18 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   only a valid UID, a random UID or an exhausted budget ends the
   insistence. Single shot / same-connection-only retries here were
   the root cause of the intermittent atr misidentification of cards
-  with a valid UID.
+  with a valid UID. **The reopen after a reset has its own generous
+  budget** (`reopenCardAfterReset`, NOT the short `openCard` window):
+  the reader needs its anti collision rerun and several field poll
+  cycles before it reports the reset card present again, and every
+  reconnect racing that reactivation answers `SCARD_E_NO_SMARTCARD`
+  although the card never left — the observed ACR122U no-btag failure
+  (the old 3×60 ms reopen gave up on a still presented card). Budget:
+  `resetReopenSettle` 100 ms before the first attempt, then up to
+  `resetReopenAttempts` 8 reconnects `resetReopenDelay` 150 ms apart;
+  every failed attempt is traced at debug level
+  (`TestWatchUIDRecoversWhenResetReactivationLags` pins it against the
+  fake's `FailResetReconnects` reactivation lag).
 - **Reader tags** `xx-xxxx-xx` hash the normalized reader name
   (`normalizeReaderName` strips volatile hotplug index groups). Tiers,
   best first: hardware serial (`SCARD_ATTR_VENDOR_IFD_SERIAL_NO`,
@@ -84,7 +95,13 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   (`pcscid/reader/v1`). `PCSCID_MAC_ID` mixes `MachineID()` into
   whichever tier applies (`pcscid/reader/m1`).
 - All-zero serial placeholders (the ACR122U serves `0`) are filtered;
-  its iSerial is firmware fixed and no host tool can write it.
+  its iSerial is firmware fixed and no host tool can write it. A
+  `SCARD_E_UNSUPPORTED_FEATURE` answer of the serial or channel id
+  GetAttrib is the expected driver property of serial-less reader
+  families (the ACR122U serves neither attribute), not a fault — the
+  trace marks it as such and the unit identity falls through to the
+  sysfs port resolution; the sentinel is exported as
+  `pcsc.ErrUnsupportedFeature`.
 - **Port resolution** (serial-less readers, opt-in): channel id
   `SCARD_ATTR_CHANNEL_ID` packs `0x0020<<16|bus<<8|dev`, resolved via
   sysfs (`/sys/bus/usb/devices`, busnum/devnum/devpath; entries are
@@ -111,7 +128,19 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   registry (a daemon restart re-enumerates the name suffixes).
   Multi-slot units qualify the port with the slot group
   (`portIdentity`, `2-1.3#01`); slot 00 keeps the plain devpath so
-  existing tags stay stable.
+  existing tags stay stable. **Identity cache**: a reader whose serial
+  or port resolved once is never identity-probed again in the same
+  daemon session (`probeReaderCard` receives the registry's cached
+  facts, `unitRegistry.cached`): the serial/channel GetAttribs, the
+  sysfs scans and the URB snapshots/pinning run once per reader, only
+  the card UID read runs on every presentation — a USB port hosts
+  one unit and re-wiring means a restart anyway (a disappeared reader
+  is forgotten, a daemon reconnect drops the whole registry). A
+  reader still without any unit fact (model tier) keeps the full
+  identity probe on later presentations, so a late serving driver
+  can still adopt its facts
+  (`TestWatchCachesUnitIdentityBetweenPresentations`,
+  `TestWatchLateFactsRecoverOnNextPresentation`).
 - `Event.ReaderTag` carries the composed tag (insertions only),
   `Event.ReaderSerial` / `Event.ReaderPort` the raw facts. An
   unresolved port under `PCSCID_USB_PATH_ID` is reported as a

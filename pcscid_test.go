@@ -533,6 +533,43 @@ func TestWatchWedgedUIDResetsAtOnce(t *testing.T) {
 	}
 }
 
+// TestWatchUIDRecoversWhenResetReactivationLags reproduces the observed
+// ACR122U no-btag failure: the UID exchange wedges (63 00), the card
+// reset clears the wedge, but the reader needs several poll cycles
+// after the power cycle before it reports the card present again —
+// every reconnect within that window answers SCARD_E_NO_SMARTCARD
+// although the card never left. A reopen budget that races the
+// reactivation (the old 3x60ms window) skips the presentation of a
+// card that is still there and has a valid uid; the reopen after a
+// reset must instead span the reactivation with a settle pause and
+// generous spaced retries.
+func TestWatchUIDRecoversWhenResetReactivationLags(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.InsertCard("R", mifareATR, uid)
+	fake.Reader("R").StuckUID = true
+	// The initial connect races the first activation attempt once,
+	// and the reader keeps answering no smartcard for the first five
+	// reconnects of the post reset window: more than the old 3 attempt
+	// reopen budget, comfortably inside the settle plus retries one.
+	fake.Reader("R").FailConnects = 1
+	fake.Reader("R").FailResetReconnects = 5
+
+	ev := receiveEvent(t, events, 5*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert: the card outlived the reset reactivation lag", ev.Kind)
+	}
+	if ev.Card.Source != "uid" {
+		t.Errorf("source = %q, want uid: a lagging reset reactivation must not skip a still presented card", ev.Card.Source)
+	}
+	if !slices.Equal(ev.Card.UID, uid) {
+		t.Errorf("uid = % X, want % X", ev.Card.UID, uid)
+	}
+}
+
 func TestWatchNoRepeatWithoutChange(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)

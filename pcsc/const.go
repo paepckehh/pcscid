@@ -106,3 +106,12 @@ var ErrTimeout = Error(errTimeout)
 // ErrProtoMismatch is returned by Connect when none of the requested
 // protocols is supported by the card in use.
 var ErrProtoMismatch = Error(errProtoMismatch)
+
+// ErrUnsupportedFeature is returned by GetAttrib when the reader driver
+// does not implement the requested attribute: a stable property of the
+// driver and reader model, not a transient failure — for example the
+// ACS ACR122U family serves neither SCARD_ATTR_VENDOR_IFD_SERIAL_NO
+// (its USB iSerial is the constant placeholder "0") nor
+// SCARD_ATTR_CHANNEL_ID. Callers may treat it as the definitive "the
+// driver has no answer" and stop asking.
+var ErrUnsupportedFeature = Error(errUnsupportedFeat)

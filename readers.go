@@ -98,7 +98,7 @@ func IdentifyReaders(opts *Options) ([]ReaderInfo, error) {
 			CardPresent: st.State&pcsc.ReaderPresent != 0,
 		}
 		if info.CardPresent {
-			facts := probeReaderCard(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, reg.byPort)
+			facts := probeReaderCard(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, reg.byPort, reg.cached(st.Reader))
 			facts = reg.adopt(lg, st.Reader, facts)
 			info.Serial = facts.serial
 			info.Port = facts.port

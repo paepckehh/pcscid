@@ -35,6 +35,7 @@
 package pcscid
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -119,14 +120,30 @@ type readerFacts struct {
 // naming every failed step, because the operator asked for a per-unit
 // identity and silently losing it makes two identical readers collide
 // on one tag.
-func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool, claims map[string]string) readerFacts {
+//
+// cached is the reader's identity already adopted by the session
+// registry (see unitRegistry). A reader whose serial or port is known
+// is NOT probed for its unit identity again: a USB port hosts exactly
+// one reader unit, the unit facts cannot change while the reader stays
+// registered (re-wiring means a restart of the program, the registry
+// forgets a disappeared reader and the daemon session reset drops it
+// anyway), so the repeated serial and channel id GetAttrib exchanges
+// — which answer SCARD_E_UNSUPPORTED_FEATURE on every presentation of
+// a serial-less reader family like the ACR122U — and the sysfs scans
+// with their URB snapshots are pure per-presentation overhead. Only
+// the card identity (the UID read) runs on every presentation; a
+// reader still without any unit fact (model tier) keeps the full
+// identity probe, so a late serving driver can still adopt its facts
+// on a later presentation.
+func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string, useUSBPath bool, claims map[string]string, cached readerFacts) readerFacts {
+	identityDone := cached.serial != "" || cached.port != ""
 	// The traffic baseline must precede the first URB of this probe,
 	// the card connection itself already talks to the device.
 	var before map[string]uint32
-	if useUSBPath {
+	if useUSBPath && !identityDone {
 		before = usbUrbSnapshot(sysfsRoot)
 	}
-	card, err := openCard(cl, reader)
+	card, err := openCard(cl, lg, reader)
 	if err != nil {
 		lg.Debug("reader unit probe connect failed after retries",
 			"reader", reader, "error", err)
@@ -160,22 +177,35 @@ func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 
 	var facts readerFacts
 	var reasons []string
-	facts.serial = readVendorSerial(live, lg, reader)
-	if facts.serial == "" && useUSBPath {
-		if bus, dev, reason := readChannelID(live, lg, reader); reason == "" {
-			port, portReason := usbPortPath(lg, sysfsRoot, bus, dev)
-			if port != "" {
-				facts.port = portIdentity(reader, port)
-				lg.Debug("reader usb port resolved by channel id",
-					"reader", reader, "bus", bus, "device", dev, "port", facts.port)
+	if identityDone {
+		// The session already holds this reader's unit identity: skip
+		// the serial and channel id GetAttrib exchanges (a serial-less
+		// reader family answers SCARD_E_UNSUPPORTED_FEATURE on every
+		// single one of them) and the sysfs port resolution with its URB
+		// snapshots and pinning exchanges. The card UID read below is
+		// the only fact that changes between presentations.
+		facts.serial, facts.port = cached.serial, cached.port
+		lg.Debug("reader unit identity from the session cache, not probed again",
+			"reader", reader, "serial", facts.serial, "port", facts.port,
+			"tier", unitTier(facts.serial, facts.port))
+	} else {
+		facts.serial = readVendorSerial(live, lg, reader)
+		if facts.serial == "" && useUSBPath {
+			if bus, dev, reason := readChannelID(live, lg, reader); reason == "" {
+				port, portReason := usbPortPath(lg, sysfsRoot, bus, dev)
+				if port != "" {
+					facts.port = portIdentity(reader, port)
+					lg.Debug("reader usb port resolved by channel id",
+						"reader", reader, "bus", bus, "device", dev, "port", facts.port)
+				} else {
+					reasons = append(reasons, portReason)
+				}
 			} else {
-				reasons = append(reasons, portReason)
+				reasons = append(reasons, reason)
 			}
-		} else {
-			reasons = append(reasons, reason)
+		} else if facts.serial == "" {
+			lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
 		}
-	} else if facts.serial == "" {
-		lg.Debug("reader usb port path identity not enabled (PCSCID_USB_PATH_ID)", "reader", reader)
 	}
 	// The card identity exchange, insisted on across card resets (a
 	// wedged PICC answers 63 00 on the whole connection, only a power
@@ -185,7 +215,7 @@ func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 	// from driver memory), so the UID round trips are what move the
 	// sysfs urbnum counter of the probed device.
 	facts.uid, facts.protocol, live = insistUID(cl, live, lg, reader)
-	if useUSBPath && facts.serial == "" && facts.port == "" {
+	if useUSBPath && !identityDone && facts.serial == "" && facts.port == "" {
 		// Strengthen the traffic signal of the probe window before
 		// the correlation reads it: every exchange is another burst
 		// of URBs to exactly this unit.
@@ -299,6 +329,15 @@ func newUnitRegistry() *unitRegistry {
 	}
 }
 
+// cached answers the reader's last adopted identity facts, the zero
+// facts when the reader was never probed this session. A caller holding
+// a non-empty serial or port can skip the identity probing entirely
+// (see probeReaderCard): the facts of a registered reader cannot
+// change within a daemon session.
+func (r *unitRegistry) cached(reader string) readerFacts {
+	return r.facts[reader]
+}
+
 // adopt merges freshly probed facts of reader into the session state
 // and answers the effective identity: a fresh fact wins over the
 // remembered one, a fresh failure falls back to the remembered one,
@@ -360,11 +399,21 @@ func (r *unitRegistry) forget(reader string) {
 
 // readVendorSerial asks for the reader hardware serial and filters the
 // placeholder values some reader families ship instead of a real one.
+// SCARD_E_UNSUPPORTED_FEATURE is the expected answer of a driver
+// without that capability (for example the ACS ACR122U family, whose
+// USB iSerial is the constant placeholder "0"), not an error to
+// investigate: the note field marks it as such in the trace.
 func readVendorSerial(card *pcsc.Card, lg *slog.Logger, reader string) string {
 	attr, err := card.GetAttrib(pcsc.AttrVendorIFDSerialNo)
 	if err != nil {
-		lg.Debug("reader serial unavailable",
-			"reader", reader, "error", err)
+		if errors.Is(err, pcsc.ErrUnsupportedFeature) {
+			lg.Debug("reader serial unavailable, the driver serves no hardware serial (expected on serial-less reader families)",
+				"reader", reader, "error", err,
+				"consequence", "the unit identity falls back to the usb port path (PCSCID_USB_PATH_ID) or the model tag")
+		} else {
+			lg.Debug("reader serial unavailable",
+				"reader", reader, "error", err)
+		}
 		return ""
 	}
 	serial := strings.TrimSpace(strings.Trim(string(attr), "\x00"))
@@ -393,12 +442,21 @@ func isPlaceholderSerial(serial string) bool {
 // readChannelID asks for the USB channel id of the reader and unpacks
 // the CCID packing 0x0020<<16 | bus<<8 | device. An empty reason
 // reports success, a non empty one names what failed, for the error
-// report of an unresolved port identity.
+// report of an unresolved port identity. SCARD_E_UNSUPPORTED_FEATURE
+// is the expected answer of a driver without that capability (the
+// ACR122U family), the port then resolves through the sysfs device
+// scan and the URB traffic correlation instead.
 func readChannelID(card *pcsc.Card, lg *slog.Logger, reader string) (bus, dev uint32, reason string) {
 	attr, err := card.GetAttrib(pcsc.AttrChannelID)
 	if err != nil {
-		lg.Debug("reader channel id unavailable",
-			"reader", reader, "error", err)
+		if errors.Is(err, pcsc.ErrUnsupportedFeature) {
+			lg.Debug("reader channel id unavailable, the driver serves no channel id (expected on readers without that capability)",
+				"reader", reader, "error", err,
+				"consequence", "the usb port resolves through the sysfs device scan and the urb traffic correlation instead")
+		} else {
+			lg.Debug("reader channel id unavailable",
+				"reader", reader, "error", err)
+		}
 		return 0, 0, fmt.Sprintf("the driver serves no channel id: %v", err)
 	}
 	if len(attr) != 4 {

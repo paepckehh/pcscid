@@ -461,8 +461,11 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 					// The unit attributes and the card UID need an open
 					// card connection, so both are probed now, while the
 					// card is there, over one connection whose exchanges
-					// also carry the USB traffic that pins the unit.
-					facts := probeReaderCard(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, tracking.units.byPort)
+					// also carry the USB traffic that pins the unit. The
+					// reader's session identity is passed in as the cache:
+					// a reader whose serial or port is already known skips
+					// the identity probing and only reads the card UID.
+					facts := probeReaderCard(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, tracking.units.byPort, tracking.units.cached(st.Reader))
 					facts = tracking.units.adopt(lg, st.Reader, facts)
 					card := identify(lg, st, facts, env.machine)
 					if card.Source != "uid" {

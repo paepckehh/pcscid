@@ -56,6 +56,32 @@ const uidReadRounds = 3
 // settling window for the card activation.
 const uidReadDelay = 60 * time.Millisecond
 
+// Post card reset reconnect budget. A wedged PICC is cured by a
+// SCARD_RESET_CARD disconnect, a power cycle after which the reader
+// reruns the anti collision — but the reader needs a moment before it
+// reports the card present again: its firmware restarts the contactless
+// field polling, and a reconnect attempted within that window answers
+// SCARD_E_NO_SMARTCARD although the card never left the reader. The
+// observed ACR122U failure pattern is exactly that: the reset clears
+// the wedge, every reconnect of the old 3x60ms budget races the
+// reactivation and fails, and a card that IS still presented gets
+// skipped (no btag) only because the reopen gave up too early. The
+// budget below spans the reactivation comfortably: a settle pause
+// before the first attempt, then generous spaced retries, every
+// attempt traced at debug level so a DEBUG=1 log shows how long the
+// reader actually took.
+const (
+	// resetReopenSettle is the pause between the reset disconnect and
+	// the first reconnect attempt: the power cycle needs it before the
+	// anti collision rerun can report the card present again.
+	resetReopenSettle = 100 * time.Millisecond
+	// resetReopenAttempts bounds the reconnect attempts after a reset.
+	resetReopenAttempts = 8
+	// resetReopenDelay is the pause between two reconnect attempts
+	// after the first one failed.
+	resetReopenDelay = 150 * time.Millisecond
+)
+
 // isRandomUID reports whether a UID is the ISO/IEC 14443-3 random
 // UID: privacy cards (for example phone NFC emulation, eID, newer
 // DESFire) answer the anti collision with a freshly generated 4 byte
@@ -72,7 +98,7 @@ func isRandomUID(uid []byte) bool {
 // freshly inserted card present before it is activated and the very
 // first connect can fail while the reader powers the card up. A reader
 // without a present card keeps failing, like a raw Connect.
-func openCard(cl *pcsc.Client, reader string) (*pcsc.Card, error) {
+func openCard(cl *pcsc.Client, lg *slog.Logger, reader string) (*pcsc.Card, error) {
 	var err error
 	for attempt := 1; ; attempt++ {
 		var card *pcsc.Card
@@ -80,6 +106,8 @@ func openCard(cl *pcsc.Client, reader string) (*pcsc.Card, error) {
 		if err == nil {
 			return card, nil
 		}
+		lg.Debug("card connect attempt failed",
+			"reader", reader, "attempt", attempt, "error", err)
 		if attempt >= uidReadAttempts {
 			return nil, err
 		}
@@ -96,6 +124,39 @@ func connectCard(cl *pcsc.Client, reader string) (*pcsc.Card, error) {
 		card, err = cl.Connect(reader, pcsc.ProtocolRaw)
 	}
 	return card, err
+}
+
+// reopenCardAfterReset reconnects to the card after a reset power
+// cycle. Unlike the initial connect of openCard (whose retries bridge
+// only the activation settling of a freshly inserted card), the
+// reconnect budget here spans the anti collision rerun of the reader:
+// a contactless reader needs its settle window and several poll
+// cycles before it reports the reset card present again, so a short
+// budget races the reactivation and skips a card that never left (the
+// observed ACR122U no-btag failure). Every attempt is traced at debug
+// level, so a DEBUG=1 log names the attempt on which the reader
+// recovered.
+func reopenCardAfterReset(cl *pcsc.Client, lg *slog.Logger, reader string, round int) (*pcsc.Card, error) {
+	time.Sleep(resetReopenSettle)
+	var err error
+	for attempt := 1; ; attempt++ {
+		var card *pcsc.Card
+		card, err = connectCard(cl, reader)
+		if err == nil {
+			if attempt > 1 {
+				lg.Debug("card back after reset",
+					"reader", reader, "round", round, "attempt", attempt)
+			}
+			return card, nil
+		}
+		lg.Debug("card reopen after reset attempt failed",
+			"reader", reader, "round", round, "attempt", attempt,
+			"budget", resetReopenAttempts, "error", err)
+		if attempt >= resetReopenAttempts {
+			return nil, err
+		}
+		time.Sleep(resetReopenDelay)
+	}
 }
 
 // transmitUID asks the presented card for its UID over one open card
@@ -243,10 +304,14 @@ func insistUID(cl *pcsc.Client, card *pcsc.Card, lg *slog.Logger, reader string)
 			lg.Debug("card reset disconnect failed",
 				"reader", reader, "round", round, "error", err)
 		}
-		next, err := openCard(cl, reader)
+		next, err := reopenCardAfterReset(cl, lg, reader, round)
 		if err != nil {
 			lg.Debug("card reopen after reset failed",
-				"reader", reader, "round", round, "error", err)
+				"reader", reader, "round", round,
+				"settle", resetReopenSettle,
+				"attempts", resetReopenAttempts,
+				"attempt_delay", resetReopenDelay,
+				"error", err)
 			return nil, protocol, nil
 		}
 		live = next

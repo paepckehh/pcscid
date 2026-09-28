@@ -740,6 +740,63 @@ func TestUsbUrbWinner(t *testing.T) {
 	}
 }
 
+// TestWatchCachesUnitIdentityBetweenPresentations pins the session
+// identity cache: a reader whose unit identity resolved once (here via
+// the channel id) is NOT probed for its identity again on later
+// presentations of the same daemon session — the serial and channel id
+// GetAttrib exchanges (a serial-less reader family answers
+// SCARD_E_UNSUPPORTED_FEATURE on every single one of them, the repeated
+// noise in a DEBUG=1 log) and the sysfs port resolution run once per
+// reader, only the card UID read runs on every presentation. The tag of
+// the second presentation is byte-identical to the first.
+func TestWatchCachesUnitIdentityBetweenPresentations(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	root := fakeSysfsUSB(t, map[uint64]string{
+		(uint64(1) << 32) | 0x22: "1-2",
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	events, err := Watch(ctx, &Options{
+		SocketPath:   fake.Addr(),
+		SysfsUSBRoot: root,
+		USBPathID:    true,
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.SetChannelID("ACS ACR122U 01 00 00", 0x00200122)
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, uid)
+	first := receiveEvent(t, events, 3*time.Second)
+	if first.Kind != KindInsert || first.ReaderPort == "" {
+		t.Fatalf("first event = %v port %q, want an insert with the resolved port", first.Kind, first.ReaderPort)
+	}
+	probes := fake.Reader("ACS ACR122U 01 00 00").AttribProbes
+	if probes == 0 {
+		t.Fatal("test setup: the first presentation must have probed the unit identity")
+	}
+
+	fake.RemoveCard("ACS ACR122U 01 00 00")
+	if ev := receiveEvent(t, events, 3*time.Second); ev.Kind != KindRemove {
+		t.Fatalf("kind = %v, want remove", ev.Kind)
+	}
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, uid)
+	second := receiveEvent(t, events, 3*time.Second)
+	if second.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", second.Kind)
+	}
+	if got := fake.Reader("ACS ACR122U 01 00 00").AttribProbes; got != probes {
+		t.Errorf("attrib probes = %d after the second presentation, want %d: the session identity must be cached, not re-probed", got, probes)
+	}
+	if second.ReaderPort != first.ReaderPort || second.ReaderTag != first.ReaderTag {
+		t.Errorf("second presentation port/tag = %q/%q, want the cached %q/%q",
+			second.ReaderPort, second.ReaderTag, first.ReaderPort, first.ReaderTag)
+	}
+}
+
 // TestWatchLateFactsRecoverOnNextPresentation pins the recovery from a
 // probe that lost the race against its own setup: the first
 // presentation probes no serial (the driver answers nothing yet, like
