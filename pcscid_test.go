@@ -506,6 +506,42 @@ func TestWatchUIDRecoversThroughCardReset(t *testing.T) {
 	}
 }
 
+// TestWatchWedgedUIDResetsAtOnce pins the pace of the wedge recovery:
+// a wedged 63 00 sticks for the whole connection, so the read loop
+// must hand the connection to the card reset after the FIRST 63 00
+// answer instead of burning its same connection retry budget on
+// exchanges that cannot succeed. The card is only present for as long
+// as the operator keeps it on the reader (the reader beeps at the
+// field detection already), so every retry pause spent on a wedged
+// connection is presence window lost. The stuck UID is cleared by the
+// reset after exactly one probe on the wedged connection, a read that
+// retried the same connection first would need a second reset cycle
+// and take the two extra uidReadAttempts plus their delays longer.
+func TestWatchWedgedUIDResetsAtOnce(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.InsertCard("R", mifareATR, uid)
+	fake.Reader("R").StuckUID = true
+	deadline := time.Now().Add(2 * time.Second)
+
+	ev := receiveEvent(t, events, 3*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.Card.Source != "uid" {
+		t.Errorf("source = %q, want uid read inside the presence window", ev.Card.Source)
+	}
+	if time.Now().After(deadline) {
+		t.Error("the wedged uid read took longer than the presence window, the reset must follow the first 63 00 immediately")
+	}
+	if got := fake.Reader("R").UIDProbes; got != 1 {
+		t.Errorf("uid probes on the wedged connection = %d, want 1: 63 00 sticks, a retry cannot clear it", got)
+	}
+}
+
 func TestWatchNoRepeatWithoutChange(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)

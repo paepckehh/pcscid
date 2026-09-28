@@ -363,8 +363,13 @@ const reconnectDelay = 500 * time.Millisecond
 
 // waitTick bounds one daemon side reader state wait. A change can slip
 // between the state fetch and the wait registration, so the tick also
-// bounds the worst case latency of an event to roughly one tick.
-const waitTick = time.Second
+// bounds the worst case latency of an event to roughly one tick: the
+// operator keeps a card on the reader only for a short window (many
+// readers beep at the field detection already), so the tick is well
+// below the human presence window, every extra fraction of a second
+// of pickup latency is a fraction of a second less to read the UID
+// before the card leaves again.
+const waitTick = 250 * time.Millisecond
 
 // watchLoop keeps a client alive across pcscd restarts and drives
 // the state change handling.

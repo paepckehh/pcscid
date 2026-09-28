@@ -130,6 +130,11 @@ type Reader struct {
 	// disconnect, the power cycle that reruns the anti collision)
 	// clears it.
 	StuckUID bool
+	// UIDProbes counts the UID probes answered while StuckUID was set.
+	// A well behaved client probes a wedged connection exactly once
+	// and then resets the card: 63 00 sticks, no same connection retry
+	// can clear it.
+	UIDProbes int
 }
 
 type card struct {
@@ -546,6 +551,7 @@ func (s *Server) transmit(conn net.Conn, body []byte) error {
 			flake = true
 		case c.reader.StuckUID:
 			stuck = true
+			c.reader.UIDProbes++
 		default:
 			uid = append([]byte(nil), c.reader.UID...)
 		}

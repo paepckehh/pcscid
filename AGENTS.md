@@ -172,9 +172,11 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   daemon stays silent until a change.
 - With NO reader registered the daemon answers the wait immediately,
   forever: the loop polls gently (500 ms) instead of spinning.
-- Each wait is bounded at 1 s (`waitTick`): a change can slip between
+- Each wait is bounded at 250 ms (`waitTick`): a change can slip between
   the states fetch and the wait registration; a timed out wait is
-  benign, the loop refetches and continues.
+  benign, the loop refetches and continues. The tick stays well under
+  the human presence window of a card because the reader beeps at the
+  field detection and the operator removes the card right after.
 - Event counters are only comparable within one daemon session:
   `pollLoop` drops the remembered counters on every (re)connection,
   a card that never moved is not re-reported.
@@ -205,3 +207,20 @@ SCARD_E_COMM_DATA_LOST for the next n attempts, the transient
 activation race of a freshly inserted card; `StuckUID` wedges the
 PICC with 63 00 for the whole connection, only a SCARD_RESET_CARD
 disconnect cures it, exactly the ACR122U failure).
+
+## Timing budget (short card presentations)
+
+The ACR122U beeps at the field detection, so an intuitive operator
+removes the card as soon as the beep is done, roughly one second
+after presenting it. The identification has to finish inside that
+window, measured from detection to UID: connect ~20 ms, the first
+UID exchange ~90 ms; a wedged 63 00 connection is NOT retried (the
+wedge sticks, retries and their `uidReadDelay` pauses only burn the
+presence window), the read loop resets the card at once (~265 ms
+power cycle) and succeeds on the first exchange of the reopened
+connection. Transport errors during the activation settle ARE still
+retried (uidReadAttempts x uidReadDelay). Empirical log of the 1 s
+failure that shaped this: attempts 1 and 2 answered 63 00, attempt 3
+answered SCARD_W_REMOVED_CARD, the reset-reopen then hit
+SCARD_E_NO_SMARTCARD — the retries before the reset cost more than
+the remaining window.

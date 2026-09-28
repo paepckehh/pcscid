@@ -57,6 +57,11 @@ const (
 	errUnsupportedFeat   uint32 = 0x8010001F
 	errNoReaders         uint32 = 0x8010002E
 	errCommDataLost      uint32 = 0x8010002F
+	// SCARD_W_* warnings: a transmit on a card connection that was
+	// reset or removed mid exchange answers with these instead of a
+	// plain error.
+	errResetCard   uint32 = 0x80100068
+	errRemovedCard uint32 = 0x80100069
 )
 
 // Limits from pcsc-lite src/pcsclite.h.
@@ -79,6 +84,8 @@ var errorNames = map[uint32]string{
 	errUnsupportedFeat:   "SCARD_E_UNSUPPORTED_FEATURE",
 	errNoReaders:         "SCARD_E_NO_READERS_AVAILABLE",
 	errCommDataLost:      "SCARD_E_COMM_DATA_LOST",
+	errResetCard:         "SCARD_W_RESET_CARD",
+	errRemovedCard:       "SCARD_W_REMOVED_CARD",
 }
 
 // Error is a PC/SC error code as returned by pcscd or winscard.dll.

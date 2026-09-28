@@ -219,6 +219,15 @@ func TestErrorMessage(t *testing.T) {
 	if got := Error(errTimeout).Error(); got != "pcsc: SCARD_E_TIMEOUT" {
 		t.Errorf("Error(errTimeout) = %q", got)
 	}
+	// The card left the reader mid exchange: pcscd answers transmit
+	// with this warning, it must show its SCARD_W_* name, not a bare
+	// hex code, in the debug trace.
+	if got := Error(0x80100069).Error(); got != "pcsc: SCARD_W_REMOVED_CARD" {
+		t.Errorf("Error(0x80100069) = %q", got)
+	}
+	if got := Error(0x80100068).Error(); got != "pcsc: SCARD_W_RESET_CARD" {
+		t.Errorf("Error(0x80100068) = %q", got)
+	}
 	if got := Error(0x12345678).Error(); got != "pcsc: error 0x12345678" {
 		t.Errorf("Error(0x12345678) = %q", got)
 	}
