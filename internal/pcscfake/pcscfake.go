@@ -208,6 +208,9 @@ func (s *Server) Reader(name string) *Reader {
 
 // InsertCard creates the reader if needed and inserts a card with the
 // given ATR. A nil UID makes the card answer 63 00 to the UID probe.
+// A fresh presentation is a fresh activation: any post reset
+// reactivation lag of a previous presentation on the same reader ends
+// here.
 func (s *Server) InsertCard(reader string, atr []byte, uid []byte) {
 	s.mu.Lock()
 	r, ok := s.readers[reader]
@@ -219,6 +222,7 @@ func (s *Server) InsertCard(reader string, atr []byte, uid []byte) {
 	r.UID = append([]byte(nil), uid...)
 	r.Present = true
 	r.EventCounter++
+	r.resetLag = false
 	s.mu.Unlock()
 	s.wakeWaiters()
 }

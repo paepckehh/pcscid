@@ -87,6 +87,28 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   every failed attempt is traced at debug level
   (`TestWatchUIDRecoversWhenResetReactivationLags` pins it against the
   fake's `FailResetReconnects` reactivation lag).
+  **Regression net** (`pcscid_test.go`, never weaken or remove):
+  `TestWatchUIDRecoversWhenResetReactivationLags` reproduces the exact
+  production failure (lag 5 > the old 3-attempt budget; it fails on any
+  budget regression), `TestWatchUIDRecoversAtReopenBudgetBoundary`
+  pins the budget against a lag of `resetReopenAttempts-1`,
+  `TestResetReopenBudgetFloor` pins the absolute floor of the three
+  constants (field calibrated), and
+  `TestWatchUIDSkipsCleanlyBeyondReopenBudget` pins the graceful side:
+  a lag beyond every budget skips the presentation without wedging
+  the loop, the removal still fires and the next healthy presentation
+  identifies the card again. `TestWatchStableIdentifiersAcrossWedges`
+  pins the end-to-end identifier promise: the same card through
+  repeated full failure paths (wedge, reset, lagging reactivation)
+  yields the byte-identical btag and reader tag on every presentation,
+  never an ATR derived identity.
+  **Golden identifier hashes** (`TestBtagGolden`,
+  `TestReaderTagGolden`, `TestReaderTagUnitGolden`): the exact btag of
+  a UID observed in production (`DD 5D 6C A5` mifare classic 1k →
+  `w79-i3r-lmr0`) and the exact reader tags of every hash domain (v1
+  model, v2 serial, v3 USB port, m1 machine mixed) are pinned — the
+  tags are long lived identifiers consumers store, any digest change
+  is a breaking release and must fail these tests.
 - **Reader tags** `xx-xxxx-xx` hash the normalized reader name
   (`normalizeReaderName` strips volatile hotplug index groups). Tiers,
   best first: hardware serial (`SCARD_ATTR_VENDOR_IFD_SERIAL_NO`,
@@ -238,14 +260,22 @@ this nix environment (race runtime needs cgo), plain tests must stay
 green. Live verification: `make build && DEBUG=1 ./pcscid` against
 the real local pcscd.
 IMPORTANT: in watch-pipeline tests configure the fake's reader facts
-(`SetSerial` / `SetChannelID`) BEFORE `InsertCard` — InsertCard wakes
-the watch loop, which probes them immediately. `fake.Reader(name)`
+(`SetSerial` / `SetChannelID`) and arm failure injection
+(`StuckUID`, `FailConnects`, `FailResetReconnects`) BEFORE
+`InsertCard` — InsertCard wakes the watch loop, which probes them
+immediately. `fake.Reader(name)`
 returns the live reader state for failure injection
 (`FailConnects`, `FailUIDProbes` answer SCARD_E_NO_SMARTCARD /
 SCARD_E_COMM_DATA_LOST for the next n attempts, the transient
 activation race of a freshly inserted card; `StuckUID` wedges the
 PICC with 63 00 for the whole connection, only a SCARD_RESET_CARD
-disconnect cures it, exactly the ACR122U failure). `RemoveCard`
+disconnect cures it, exactly the ACR122U failure;
+`FailResetReconnects` answers SCARD_E_NO_SMARTCARD for the next n
+connects AFTER a reset disconnect — the reactivation lag of the anti
+collision rerun, the second half of the observed ACR122U failure; a
+fresh `InsertCard` ends the lag; `AttribProbes` counts the serial and
+channel id GetAttrib requests, the meter of the session identity
+cache). `RemoveCard`
 publishes a removal event through the same fake.
 
 ## Timing budget (short card presentations)

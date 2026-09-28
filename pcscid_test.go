@@ -101,6 +101,9 @@ func TestBtagGolden(t *testing.T) {
 		{"mifare classic 1k", []byte{0x04, 0x11, 0x22, 0x33}, "r3v-401-5gmr"},
 		{"unknown", nil, "szf-6lf-34qs"},
 		{"german eid/passport (npa)", []byte{0x3B, 0x84, 0x80, 0x01, 0x80, 0x82, 0x90, 0x00, 0x97}, "wyo-gij-v6er"},
+		// A UID actually observed on an ACR122U production reader: the
+		// golden value is the btag the kiosk line printed for it.
+		{"mifare classic 1k", []byte{0xDD, 0x5D, 0x6C, 0xA5}, "w79-i3r-lmr0"},
 	}
 	for _, g := range golden {
 		if got := Btag(g.cardType, g.tag); got != g.want {
@@ -123,6 +126,32 @@ func TestReaderTagGolden(t *testing.T) {
 	for _, g := range golden {
 		if got := ReaderTag(g.reader); got != g.want {
 			t.Errorf("ReaderTag(%q) = %q, want %q", g.reader, got, g.want)
+		}
+	}
+}
+
+// TestReaderTagUnitGolden pins the exact derivation of every per-unit
+// reader tag domain for the same reason as TestReaderTagGolden: the
+// tags are long lived identifiers consumers store (chrony registers
+// them per reader), so the digest of the serial domain (v2), the USB
+// port domain (v3) and the machine mixed domain (m1) must never change
+// silently — any change here is a breaking release.
+func TestReaderTagUnitGolden(t *testing.T) {
+	t.Parallel()
+	golden := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"ReaderTagWithSerial", ReaderTagWithSerial("ACS ACR122U 01 00 00", "A001"), "dw-wigt-z8"},
+		{"ReaderTagWithUnit port", ReaderTagWithUnit("ACS ACR122U 01 00 00", "", "1-4.2"), "ek-0gkq-n2"},
+		{"ReaderTagWithUnit port plain", ReaderTagWithUnit("ACS ACR122U 02 00", "", "4.2"), "lz-lb02-4g"},
+		{"ReaderTagWithMachine port", ReaderTagWithMachine("ACS ACR122U 01 00 00", "", "1-4.2", "aa:bb:cc:dd:ee:01"), "vh-mzk6-9x"},
+		{"ReaderTagWithMachine serial", ReaderTagWithMachine("ACS ACR122U 01 00 00", "A001", "", "aa:bb:cc:dd:ee:01"), "ji-2s3b-b9"},
+	}
+	for _, g := range golden {
+		if g.got != g.want {
+			t.Errorf("%s = %q, want %q", g.name, g.got, g.want)
 		}
 	}
 }
@@ -549,14 +578,16 @@ func TestWatchUIDRecoversWhenResetReactivationLags(t *testing.T) {
 	events, _ := watchFake(t, fake)
 
 	uid := []byte{0x04, 0x11, 0x22, 0x33}
-	fake.InsertCard("R", mifareATR, uid)
+	// The failure modes are armed before the card lands, so the watch
+	// loop cannot win the race and read it healthy.
 	fake.Reader("R").StuckUID = true
-	// The initial connect races the first activation attempt once,
-	// and the reader keeps answering no smartcard for the first five
+	// The initial connect races the first activation attempt once, and
+	// the reader keeps answering no smartcard for the first five
 	// reconnects of the post reset window: more than the old 3 attempt
 	// reopen budget, comfortably inside the settle plus retries one.
 	fake.Reader("R").FailConnects = 1
 	fake.Reader("R").FailResetReconnects = 5
+	fake.InsertCard("R", mifareATR, uid)
 
 	ev := receiveEvent(t, events, 5*time.Second)
 	if ev.Kind != KindInsert {
@@ -567,6 +598,133 @@ func TestWatchUIDRecoversWhenResetReactivationLags(t *testing.T) {
 	}
 	if !slices.Equal(ev.Card.UID, uid) {
 		t.Errorf("uid = % X, want % X", ev.Card.UID, uid)
+	}
+}
+
+// TestWatchUIDRecoversAtReopenBudgetBoundary pins the SIZE of the post
+// reset reopen budget: a reactivation lag of exactly
+// resetReopenAttempts-1 failed reconnects — the worst the budget must
+// absorb — still yields the uid derived btag. Shrinking the budget (or
+// the settle/delay constants shrinking the window the field observed
+// failures need) fails this test, so the no-btag regression of the
+// 3x60ms reopen cannot silently return.
+func TestWatchUIDRecoversAtReopenBudgetBoundary(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.Reader("R").StuckUID = true
+	fake.Reader("R").FailResetReconnects = resetReopenAttempts - 1
+	fake.InsertCard("R", mifareATR, uid)
+
+	ev := receiveEvent(t, events, 8*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert: the reopen budget must absorb resetReopenAttempts-1 lagging reconnects", ev.Kind)
+	}
+	if ev.Card.Source != "uid" || !slices.Equal(ev.Card.UID, uid) {
+		t.Errorf("card = source %q uid % X, want the uid derived identity", ev.Card.Source, ev.Card.UID)
+	}
+}
+
+// TestWatchUIDSkipsCleanlyBeyondReopenBudget pins the other side of the
+// budget: a card whose reactivation never completes within the reopen
+// window is skipped (no btag without a valid uid, never an ATR derived
+// identity) WITHOUT wedging anything — the removal still fires, the
+// loop stays alive, and the very next presentation of a healthy card on
+// the same reader yields the correct uid derived btag again. A budget
+// exhaustion must be one lost presentation, never a lost reader.
+func TestWatchUIDSkipsCleanlyBeyondReopenBudget(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	fake.Reader("R").StuckUID = true
+	fake.Reader("R").FailResetReconnects = 100 // far beyond every budget
+	fake.InsertCard("R", mifareATR, uid)
+	assertNoEvent(t, events, 2*time.Second)
+
+	// The card leaves, the removal must still be reported.
+	fake.RemoveCard("R")
+	if ev := receiveEvent(t, events, 5*time.Second); ev.Kind != KindRemove {
+		t.Fatalf("kind = %v, want remove: an exhausted reopen budget must not wedge the watch loop", ev.Kind)
+	}
+
+	// The next, healthy presentation identifies the card again.
+	fake.InsertCard("R", mifareATR, uid)
+	ev := receiveEvent(t, events, 5*time.Second)
+	if ev.Kind != KindInsert {
+		t.Fatalf("kind = %v, want insert", ev.Kind)
+	}
+	if ev.Card.Source != "uid" || ev.Card.ID != Btag("mifare classic 1k", uid) {
+		t.Errorf("card = source %q id %q, want the uid derived btag %q", ev.Card.Source, ev.Card.ID, Btag("mifare classic 1k", uid))
+	}
+}
+
+// TestResetReopenBudgetFloor pins the absolute floor of the post reset
+// reopen budget: the constants are calibrated against the field
+// observed ACR122U reactivation lag (the reader needs several field
+// poll cycles, ~300ms and more, before it reports the reset card
+// present again). Shrinking them below the observed need re-opens the
+// no-btag failure this budget closed; a change here is a deliberate
+// product decision, never a cleanup.
+func TestResetReopenBudgetFloor(t *testing.T) {
+	t.Parallel()
+	if resetReopenAttempts < 8 {
+		t.Errorf("resetReopenAttempts = %d, want at least 8 reconnects after a reset", resetReopenAttempts)
+	}
+	if resetReopenSettle < 100*time.Millisecond {
+		t.Errorf("resetReopenSettle = %v, want at least 100ms before the first reconnect", resetReopenSettle)
+	}
+	if resetReopenDelay < 150*time.Millisecond {
+		t.Errorf("resetReopenDelay = %v, want at least 150ms between reconnects", resetReopenDelay)
+	}
+}
+
+// TestWatchStableIdentifiersAcrossWedges pins the end to end promise
+// the UID insistence exists for: the SAME card on the SAME reader
+// yields the byte-identical btag and reader tag on every presentation,
+// even when every single one of them runs through the full failure
+// path — the wedged 63 00 connection, the card reset and the lagging
+// post reset reactivation. The identifier may never depend on how many
+// exchanges a presentation needed, and never degrade to the ATR.
+func TestWatchStableIdentifiersAcrossWedges(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	events, _ := watchFake(t, fake)
+
+	uid := []byte{0x04, 0x11, 0x22, 0x33}
+	wantID := Btag("mifare classic 1k", uid)
+	firstID, firstTag := "", ""
+	for presentation := 1; presentation <= 3; presentation++ {
+		// The knobs are re-armed before every card lands: each
+		// presentation runs through the full failure path.
+		fake.Reader("R").StuckUID = true
+		fake.Reader("R").FailResetReconnects = 2
+		fake.InsertCard("R", mifareATR, uid)
+
+		ev := receiveEvent(t, events, 5*time.Second)
+		if ev.Kind != KindInsert {
+			t.Fatalf("presentation %d: kind = %v, want insert", presentation, ev.Kind)
+		}
+		if ev.Card.ID != wantID || ev.Card.Source != "uid" {
+			t.Errorf("presentation %d: id = %q source %q, want the stable uid derived %q",
+				presentation, ev.Card.ID, ev.Card.Source, wantID)
+		}
+		if presentation > 1 && (ev.Card.ID != firstID || ev.ReaderTag != firstTag) {
+			t.Errorf("presentation %d: id/tag = %q/%q, want the byte-identical %q/%q of the first presentation",
+				presentation, ev.Card.ID, ev.ReaderTag, firstID, firstTag)
+		}
+		firstID, firstTag = ev.Card.ID, ev.ReaderTag
+		if ev.Card.ID == Btag("mifare classic 1k", mifareATR) {
+			t.Errorf("presentation %d: the id degraded to an atr derived identity", presentation)
+		}
+
+		fake.RemoveCard("R")
+		if ev := receiveEvent(t, events, 5*time.Second); ev.Kind != KindRemove {
+			t.Fatalf("presentation %d: kind = %v, want remove", presentation, ev.Kind)
+		}
 	}
 }
 
