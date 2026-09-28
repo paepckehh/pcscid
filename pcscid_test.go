@@ -47,6 +47,17 @@ func receiveEvent(t *testing.T, events <-chan Event, timeout time.Duration) Even
 	}
 }
 
+// assertNoEvent pins the silence of a skipped presentation: nothing
+// may arrive on the channel for the whole window.
+func assertNoEvent(t *testing.T, events <-chan Event, window time.Duration) {
+	t.Helper()
+	select {
+	case ev := <-events:
+		t.Fatalf("unexpected event %+v, want none", ev)
+	case <-time.After(window):
+	}
+}
+
 func watchFake(t *testing.T, fake *pcscfake.Server) (<-chan Event, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -360,69 +371,55 @@ func TestWatchDistinguishesSameTypeDifferentUID(t *testing.T) {
 	}
 }
 
-func TestWatchFallsBackToATRWhenNoUID(t *testing.T) {
+// TestWatchSkipsPresentationWhenNoUID pins the identity rule: a
+// reader/btag combination is only ever output for a card with a valid
+// UID. A card that never serves one (here: it answers 63 00 to every
+// UID probe) produces NO insertion event at all, no ATR derived type
+// level btag. The skip is silent in normal mode, the DEBUG=1 trace
+// keeps every detail. The removal still fires, so the loop stays
+// alive and consistent.
+func TestWatchSkipsPresentationWhenNoUID(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
 	events, _ := watchFake(t, fake)
 
 	fake.InsertCard("R", mifareATR, nil) // card answers 63 00 to the uid probe
-	ev := receiveEvent(t, events, 3*time.Second)
-	if ev.Kind != KindInsert {
-		t.Fatalf("kind = %v, want insert", ev.Kind)
-	}
-	if ev.Card.Source != "atr" {
-		t.Errorf("source = %q, want atr", ev.Card.Source)
-	}
-	if len(ev.Card.UID) != 0 {
-		t.Errorf("uid = % X, want empty", ev.Card.UID)
-	}
-	if ev.Card.ID != Btag("mifare classic 1k", mifareATR) {
-		t.Errorf("id = %q, want atr derived id", ev.Card.ID)
+	assertNoEvent(t, events, 750*time.Millisecond)
+	fake.RemoveCard("R")
+	if ev := receiveEvent(t, events, 3*time.Second); ev.Kind != KindRemove {
+		t.Fatalf("kind = %v, want remove: the skipped presentation must not wedge the loop", ev.Kind)
 	}
 }
 
-func TestWatchRandomUIDFallsBackToATR(t *testing.T) {
+// TestWatchRandomUIDSkipsPresentation pins the privacy card rule: an
+// ISO/IEC 14443-3 random UID (first byte 0x08, a new value on every
+// activation) identifies nothing, and no btag is served without a
+// valid UID. Both touches stay silent, no ATR derived type level
+// identity leaks out.
+func TestWatchRandomUIDSkipsPresentation(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
 	events, _ := watchFake(t, fake)
 
-	// ISO/IEC 14443-3 random uid: first byte 0x08, a new value on
-	// every activation. It must not enter the identity, the btag
-	// falls back to the ATR and stays stable across touches.
 	fake.InsertCard("R", mifareATR, []byte{0x08, 0x11, 0x22, 0x33})
-	first := receiveEvent(t, events, 3*time.Second)
-	if first.Kind != KindInsert {
-		t.Fatalf("kind = %v, want insert", first.Kind)
-	}
-	if first.Card.Source != "atr" {
-		t.Errorf("source = %q, want atr", first.Card.Source)
-	}
-	if len(first.Card.UID) != 0 {
-		t.Errorf("uid = % X, want empty for a random uid", first.Card.UID)
-	}
+	assertNoEvent(t, events, 750*time.Millisecond)
 	fake.RemoveCard("R")
 	if ev := receiveEvent(t, events, 3*time.Second); ev.Kind != KindRemove {
 		t.Fatalf("kind = %v, want remove", ev.Kind)
 	}
 	fake.InsertCard("R", mifareATR, []byte{0x08, 0xAA, 0xBB, 0xCC})
-	second := receiveEvent(t, events, 3*time.Second)
-	if second.Kind != KindInsert {
-		t.Fatalf("kind = %v, want insert", second.Kind)
-	}
-	if second.Card.ID != first.Card.ID {
-		t.Errorf("id changed with the random uid: %q then %q", first.Card.ID, second.Card.ID)
-	}
+	assertNoEvent(t, events, 750*time.Millisecond)
 }
 
 // TestWatchInsistsOnUIDAfterTransientFailures reproduces the intermittent
 // atr misidentification of a card with a valid uid: pcscd reports a
 // freshly inserted contactless card present before its activation has
 // settled, so the first connect can fail with no smartcard and the
-// first UID exchanges can fail on the transport. One single shot
-// identification silently degraded to the type level ATR identity
-// depending on when the probe ran; the identification must instead
-// retry the connect and the UID exchange and report the uid derived
-// btag.
+// first UID exchanges can fail on the transport. A single shot
+// identification silently skipped the presentation (no btag without a
+// valid uid) depending on when the probe ran; the identification must
+// instead retry the connect and the UID exchange and report the uid
+// derived btag.
 func TestWatchInsistsOnUIDAfterTransientFailures(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
@@ -450,10 +447,13 @@ func TestWatchInsistsOnUIDAfterTransientFailures(t *testing.T) {
 	}
 }
 
-// TestWatchStillFallsBackToATRWhenUIDNeverComes pins the other side of
+// TestWatchSkipsPresentationWhenUIDNeverComes pins the other side of
 // the retry budget: a card whose UID exchange fails on every attempt,
-// not only while the activation settles, keeps the atr fallback.
-func TestWatchStillFallsBackToATRWhenUIDNeverComes(t *testing.T) {
+// not only while the activation settles, is never identified. No btag
+// without a valid UID: the presentation is skipped (silently in
+// normal mode, the full trace under DEBUG=1), no ATR derived type
+// level identity is emitted.
+func TestWatchSkipsPresentationWhenUIDNeverComes(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)
 	events, _ := watchFake(t, fake)
@@ -461,16 +461,7 @@ func TestWatchStillFallsBackToATRWhenUIDNeverComes(t *testing.T) {
 	fake.InsertCard("R", mifareATR, []byte{0x04, 0x11, 0x22, 0x33})
 	fake.Reader("R").FailUIDProbes = 1000 // more than the retry budget
 
-	ev := receiveEvent(t, events, 5*time.Second)
-	if ev.Kind != KindInsert {
-		t.Fatalf("kind = %v, want insert", ev.Kind)
-	}
-	if ev.Card.Source != "atr" {
-		t.Errorf("source = %q, want atr", ev.Card.Source)
-	}
-	if ev.Card.ID != Btag("mifare classic 1k", mifareATR) {
-		t.Errorf("id = %q, want the atr derived btag", ev.Card.ID)
-	}
+	assertNoEvent(t, events, 2*time.Second)
 }
 
 // TestWatchUIDRecoversThroughCardReset reproduces the intermittent atr
@@ -480,8 +471,8 @@ func TestWatchStillFallsBackToATRWhenUIDNeverComes(t *testing.T) {
 // exchange on the same connection. No same connection retry clears it,
 // only a card reset (SCARD_RESET_CARD, the power cycle that reruns the
 // anti collision) does. The identification must reset the card and
-// still report the uid derived btag, never silently degrade to the
-// type level ATR identity.
+// still report the uid derived btag, never silently skip the
+// presentation of a card that does have a valid uid.
 func TestWatchUIDRecoversThroughCardReset(t *testing.T) {
 	t.Parallel()
 	fake := newFake(t)

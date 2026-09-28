@@ -5,9 +5,12 @@
 // It is pure Go without cgo, on Unix it speaks the pcscd daemon wire
 // protocol directly. The identifier of a card, its btag, is a short
 // hash over the card type and the unique tag of the individual card,
-// normally its UID read through the PC/SC part 3 GET DATA APDU. When
-// no UID can be read the ATR is used, which identifies the card on
-// type level only.
+// its UID read through the PC/SC part 3 GET DATA APDU. A btag always
+// requires a valid UID: when no UID can be read (a failed probe or an
+// ISO/IEC 14443-3 random UID that identifies nothing) the card
+// presentation carries no btag and no insertion event is reported —
+// silently in normal operation, with the full diagnostic trace under
+// a debug level logger.
 package pcscid
 
 import (
@@ -58,9 +61,12 @@ type Card struct {
 	// Reader is the reader name the card was seen on. The same card
 	// reports the same ID on every reader.
 	Reader string
-	// Source is what the ID was derived from: "uid" for a card
-	// unique tag, "atr" for a type level fallback when neither card nor
-	// reader provides a UID.
+	// Source is what the ID was derived from: "uid" when the card
+	// served its unique tag, "none" when it did not (a failed UID
+	// read or an ISO/IEC 14443-3 random UID that identifies nothing).
+	// "none" means ID is empty: no btag is served without a valid
+	// UID, the presentation is skipped instead of degraded to an ATR
+	// derived type level tag.
 	Source string
 }
 
@@ -165,11 +171,13 @@ func digestID(parts ...[]byte) [sha256.Size]byte {
 }
 
 // Btag derives the btag, the short unique identifier of a card,
-// from its type and the unique tag of the individual card, its UID,
-// or its ATR when no UID is available. The btag is 10 characters from
-// the digits and lower case letters in three dash separated groups,
-// xxx-xxx-xxxx, stable across readers and re-presentations, and
-// different for two cards of the same type with different tags.
+// from its type and the unique tag of the individual card, its UID.
+// The btag is 10 characters from the digits and lower case letters in
+// three dash separated groups, xxx-xxx-xxxx, stable across readers
+// and re-presentations, and different for two cards of the same type
+// with different tags. It always requires a valid UID: a card whose
+// UID cannot be read is never served a btag derived from its ATR,
+// which would only identify the card type, not the individual card.
 func Btag(cardType string, tag []byte) string {
 	sum := digestID([]byte("pcscid/v1|"), []byte(cardType), []byte("|"), tag)
 	return btagFormat(sum[:], 10, 3, 6)
@@ -457,9 +465,21 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 					facts := probeReaderCard(cl, lg, st.Reader, env.sysfsRoot, env.useUSBPath, tracking.units.byPort)
 					facts = tracking.units.adopt(lg, st.Reader, facts)
 					card := identify(lg, st, facts, env.machine)
-					tag := ReaderTagWithMachine(st.Reader, facts.serial, facts.port, env.machine)
-					if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderTag: tag, ReaderSerial: facts.serial, ReaderPort: facts.port}) {
-						return nil
+					if card.Source != "uid" {
+						// No valid UID means no btag: no reader/btag
+						// combination is emitted for this presentation.
+						// The identify call above already traced every
+						// detail at debug level, normal mode stays
+						// silent (the skip is not an error the
+						// consumer could act on, the card simply
+						// cannot be identified).
+						lg.Debug("insertion event suppressed, card without a valid uid",
+							"reader", st.Reader)
+					} else {
+						tag := ReaderTagWithMachine(st.Reader, facts.serial, facts.port, env.machine)
+						if !emit(ctx, ch, Event{Kind: KindInsert, Card: card, Reader: st.Reader, ReaderTag: tag, ReaderSerial: facts.serial, ReaderPort: facts.port}) {
+							return nil
+						}
 					}
 				}
 			} else if wasPresent {
@@ -511,7 +531,11 @@ func pollLoop(ctx context.Context, cl *pcsc.Client, tracking *readerTracking, en
 }
 
 // identify builds the Card for a present reader state from the facts
-// the merged probe gathered over its card connection.
+// the merged probe gathered over its card connection. A btag always
+// requires a valid UID: when the probe came up without one (a failed
+// read or an ISO/IEC 14443-3 random UID) the Card carries no ID and
+// Source "none", and the caller skips the presentation instead of
+// degrading the identity to an ATR derived type level tag.
 func identify(lg *slog.Logger, st pcsc.ReaderState, facts readerFacts, machine string) *Card {
 	cardType := DetectType(st.ATR)
 	card := &Card{Type: cardType, ATR: st.ATR, Reader: st.Reader}
@@ -521,20 +545,39 @@ func identify(lg *slog.Logger, st pcsc.ReaderState, facts readerFacts, machine s
 		card.ID = Btag(cardType, uid)
 		card.Source = "uid"
 	} else {
-		card.ID = Btag(cardType, st.ATR)
-		card.Source = "atr"
+		card.Source = "none"
 	}
-	lg.Debug("card inserted",
-		"reader", st.Reader,
-		"id", card.ID,
-		"reader-tag", ReaderTagWithMachine(st.Reader, facts.serial, facts.port, machine),
-		"reader-serial", facts.serial,
-		"reader-port", facts.port,
-		"type", cardType,
-		"source", card.Source,
-		"uid", fmt.Sprintf("% X", uid),
-		"atr", fmt.Sprintf("% X", st.ATR),
-		"protocol", protocolName(facts.protocol))
+	if card.Source == "none" {
+		// No valid UID, no btag: the presentation is not reported.
+		// The full reason lives in the uid read trace above (a failed
+		// exchange, a wedged PICC or a random UID), this record adds
+		// every fact the identification had, so a DEBUG=1 operator sees
+		// the complete picture in one place. Normal mode stays silent.
+		lg.Debug("card presentation skipped, no btag without a valid uid",
+			"reader", st.Reader,
+			"reason", "the uid read produced no valid uid, see the uid trace above for why",
+			"reader-tag", ReaderTagWithMachine(st.Reader, facts.serial, facts.port, machine),
+			"reader-serial", facts.serial,
+			"reader-port", facts.port,
+			"type", cardType,
+			"uid", fmt.Sprintf("% X", uid),
+			"atr", fmt.Sprintf("% X", st.ATR),
+			"protocol", protocolName(facts.protocol),
+			"consequence", "no reader/btag line is printed for this presentation",
+			"note", "the atr would only identify the card type, not the individual card")
+	} else {
+		lg.Debug("card inserted",
+			"reader", st.Reader,
+			"id", card.ID,
+			"reader-tag", ReaderTagWithMachine(st.Reader, facts.serial, facts.port, machine),
+			"reader-serial", facts.serial,
+			"reader-port", facts.port,
+			"type", cardType,
+			"source", card.Source,
+			"uid", fmt.Sprintf("% X", uid),
+			"atr", fmt.Sprintf("% X", st.ATR),
+			"protocol", protocolName(facts.protocol))
+	}
 	return card
 }
 

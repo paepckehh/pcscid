@@ -47,7 +47,9 @@ const uidReadAttempts = 3
 // connection. Only a card reset (a power cycle, the reader reruns the
 // anti collision) clears it, so every failed round resets the card
 // and reopens the connection before the identification gives up on
-// the UID and falls back to the ATR.
+// the UID: a card without a valid UID is never identified, its
+// presentation is skipped (no btag), silently in normal mode and with
+// the full trace under a debug level logger.
 const uidReadRounds = 3
 
 // uidReadDelay is the pause between two UID read attempts, a short
@@ -59,7 +61,7 @@ const uidReadDelay = 60 * time.Millisecond
 // DESFire) answer the anti collision with a freshly generated 4 byte
 // UID whose first byte is 0x08 on every activation. Such a UID
 // changes on every touch and identifies nothing, the caller must
-// fall back to the ATR, type level identity.
+// skip the card's identity: no btag is served without a valid UID.
 func isRandomUID(uid []byte) bool {
 	return len(uid) == 4 && uid[0] == 0x08
 }
@@ -134,8 +136,9 @@ func transmitUID(card *pcsc.Card, lg *slog.Logger, reader string, round int) (ui
 // uidExchange performs one UID request and classifies its outcome.
 // done is true when the answer is final: either a usable UID, or the
 // ISO/IEC 14443-3 random UID, which identifies nothing (a new value
-// on every activation, retrying cannot help, the caller falls back to
-// the ATR). wedged is true for the 63 00 answer of a PICC the reader
+// on every activation, retrying cannot help, the caller skips the
+// card identity: no btag without a valid UID). wedged is true for the
+// 63 00 answer of a PICC the reader
 // firmware cannot serve in its current state: it sticks for the whole
 // connection, so the caller goes for the card reset at once instead
 // of wasting retries (and with them the short presence window of the
@@ -169,7 +172,7 @@ func uidExchange(card *pcsc.Card, lg *slog.Logger, reader string, attempt int) (
 		return nil, false, false
 	}
 	if isRandomUID(uid) {
-		lg.Debug("uid is iso 14443-3 random uid, not a card identity, falling back to atr identity",
+		lg.Debug("uid is iso 14443-3 random uid, not a card identity, the presentation is skipped (no btag without a valid uid)",
 			"reader", reader, "uid", fmt.Sprintf("% X", uid))
 		return nil, true, false
 	}
@@ -203,10 +206,12 @@ func protocolName(p uint32) string {
 // the UID becomes readable. So every round that produced no final
 // answer resets the card and opens a fresh connection, up to
 // uidReadRounds rounds of uidReadAttempts exchanges each, before the
-// identification gives up and the caller falls back to the ATR, the
-// type level identity. Only two answers end the insistence early: a
-// usable UID (success), and the ISO/IEC 14443-3 random UID, which
-// identifies nothing and never improves through a reset.
+// identification gives up on the UID: the presentation is then
+// skipped, no btag is served without a valid UID (silently in normal
+// mode, the trace above carries the details under DEBUG). Only two
+// answers end the insistence early: a usable UID (success), and the
+// ISO/IEC 14443-3 random UID, which identifies nothing and never
+// improves through a reset.
 //
 // insistUID owns the card lifecycle: intermediate connections are
 // already disconnected here, the returned live connection is the one
@@ -221,9 +226,15 @@ func insistUID(cl *pcsc.Client, card *pcsc.Card, lg *slog.Logger, reader string)
 			return uid, protocol, live
 		}
 		if round >= uidReadRounds {
-			lg.Error("uid unreadable after every round, the card identity falls back to the atr",
+			// Debug only, never an error: in normal mode the skipped
+			// presentation must stay silent, the consumer cannot act on
+			// an unidentifiable card anyway. DEBUG=1 keeps every detail.
+			lg.Debug("uid unreadable after every round, the card presentation is skipped (no btag without a valid uid)",
 				"reader", reader, "rounds", round,
-				"consequence", "the btag identifies the card type, not the individual card")
+				"attempts_per_round", uidReadAttempts,
+				"rounds_budget", uidReadRounds,
+				"protocol", protocolName(protocol),
+				"consequence", "no reader/btag line is printed for this presentation")
 			return nil, protocol, live
 		}
 		lg.Debug("uid unreadable on this connection, resetting the card",

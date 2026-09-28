@@ -130,8 +130,13 @@ func probeReaderCard(cl *pcsc.Client, lg *slog.Logger, reader, sysfsRoot string,
 	if err != nil {
 		lg.Debug("reader unit probe connect failed after retries",
 			"reader", reader, "error", err)
-		lg.Error("card connection failed, the card identity falls back to the atr and the reader tag to the model",
-			"reader", reader, "error", err)
+		// Debug only, never an error: in normal mode the skipped
+		// presentation must stay silent. Without the card connection
+		// there is no UID, so no btag either: the presentation is
+		// skipped, and the reader tag falls back to the model level.
+		lg.Debug("card connection failed, the card presentation is skipped (no btag without a valid uid) and the reader tag falls back to the model",
+			"reader", reader, "error", err,
+			"consequence", "no reader/btag line is printed for this presentation")
 		if useUSBPath {
 			lg.Error("reader unit identity unreadable, the card connection failed (PCSCID_USB_PATH_ID=1)",
 				"reader", reader, "error", err,

@@ -57,10 +57,14 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   `alnum(SHA-256("pcscid/v1|"+card-type+"|"+uid)[:10])`,
   `xxx-xxx-xxxx`, digits and lowercase only. Pure function of card
   type + tag: same card, same btag on every machine, socket, reader.
-  UID from the `FF CA 00 00 00` GET DATA pseudo-APDU; ATR is the
-  fallback (`Card.Source`: `uid` / `atr`). Random UIDs (ISO 14443-3:
-  4 bytes starting `0x08`, new per activation) identify nothing →
-  ATR fallback. The UID read insists (`uidReadRounds` rounds over
+  UID from the `FF CA 00 00 00` GET DATA pseudo-APDU. A btag ALWAYS
+  needs a valid UID (`Card.Source`: `uid` / `none`): a failed UID
+  read or a random UID (ISO 14443-3: 4 bytes starting `0x08`, new
+  per activation, identifies nothing) yields NO insertion event at
+  all, never an ATR derived type level btag. The skip is silent in
+  normal mode, `DEBUG=1` keeps every detail (per-attempt trace plus
+  one summary record with reader, tag facts, type, uid, atr,
+  protocol). The UID read insists (`uidReadRounds` rounds over
   `uidReadAttempts` exchanges each, `uidReadDelay` pauses, all in
   `uid.go` `insistUID`): pcscd reports a card present before its
   activation settled, and a contactless reader (ACR122U family,
@@ -124,7 +128,8 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   and printed on stderr at info level: name, model tag, unit facts
   (the port resolves card-less when unambiguous, the serial needs a
   card), tier, effective tag, plus the identification of a present
-  card.
+  card (a card without a valid UID is reported as `present without a
+  valid uid, no btag`, never with an ATR derived btag).
 - Env: `PCSCID_HTTP_ADDR`, `PCSCID_HTTP_ALLOW_REMOTE`,
   `PCSCID_USB_PATH_ID`, `PCSCID_MAC_ID`, `PCSCID_SIGN_KEY`
   (passphrase-less ssh-ed25519; appends `$` + base64 SSHSIG to every

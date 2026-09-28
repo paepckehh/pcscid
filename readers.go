@@ -56,7 +56,9 @@ type ReaderInfo struct {
 	CardPresent bool
 	// Card is the identification of the presented card, the same
 	// derivation an insertion event carries, nil when CardPresent
-	// is false.
+	// is false. A card whose UID could not be read carries Source
+	// "none" and an empty ID (no btag without a valid UID), only
+	// the type and ATR facts are reported.
 	Card *Card
 }
 

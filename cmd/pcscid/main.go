@@ -146,10 +146,22 @@ func run() error {
 			details = append(details, "port", r.Port)
 		}
 		if r.CardPresent {
-			details = append(details,
-				"card", r.Card.ID,
-				"card_type", r.Card.Type,
-				"card_source", r.Card.Source)
+			if r.Card.Source == "uid" {
+				details = append(details,
+					"card", r.Card.ID,
+					"card_type", r.Card.Type,
+					"card_source", r.Card.Source)
+			} else {
+				// No valid UID means no btag: never report a
+				// type level ATR identity as a card tag. The
+				// verbose reason lives in the DEBUG=1 trace,
+				// the inventory stays at one honest line.
+				details = append(details,
+					"card", "present without a valid uid, no btag",
+					"card_type", r.Card.Type,
+					"card_source", r.Card.Source,
+					"card_atr", fmt.Sprintf("% X", r.Card.ATR))
+			}
 		} else {
 			note := "unit facts need a presented card, the report starts at the model level tag"
 			if r.Port != "" {

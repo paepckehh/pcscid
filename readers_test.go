@@ -65,6 +65,38 @@ func TestIdentifyReadersCardPresent(t *testing.T) {
 	}
 }
 
+// TestIdentifyReadersCardWithoutUID pins the inventory side of the
+// identity rule: a presented card whose UID cannot be read (nil UID,
+// the fake answers 63 00) is reported without a btag, Source "none"
+// and an empty ID. The inventory never serves an ATR derived type
+// level identity as a card tag.
+func TestIdentifyReadersCardWithoutUID(t *testing.T) {
+	t.Parallel()
+	fake := newFake(t)
+	fake.InsertCard("ACS ACR122U 01 00 00", mifareATR, nil)
+
+	readers, err := IdentifyReaders(&Options{SocketPath: fake.Addr(), Logger: discardLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(readers) != 1 {
+		t.Fatalf("readers = %d, want 1", len(readers))
+	}
+	r := readers[0]
+	if !r.CardPresent || r.Card == nil {
+		t.Fatal("present card not evaluated")
+	}
+	if r.Card.ID != "" {
+		t.Errorf("card id = %q, want empty: no btag without a valid uid", r.Card.ID)
+	}
+	if r.Card.Source != "none" {
+		t.Errorf("card source = %q, want none", r.Card.Source)
+	}
+	if r.Card.Type != "mifare classic 1k" {
+		t.Errorf("card type = %q, want the atr derived type", r.Card.Type)
+	}
+}
+
 // TestIdentifyReadersNoCardModelTier documents the limitation: without
 // a presented card the unit facts cannot be probed, the reader reports
 // the model level tier and tag.

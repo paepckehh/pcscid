@@ -32,7 +32,7 @@ Every other smart card tooling path funnels you through C bindings, type detecti
 - **Identity, not just type detection.** The ATR alone tells you *a MIFARE Classic 1K was tapped* — every card of that model shares it. `pcscid` reads the card's own anti-collision UID through the PC/SC part 3 `GET DATA` APDU (`FF CA 00 00 00`) and folds it into a short **btag**: `xxx-xxx-xxxx`, digits and lowercase letters, stable across readers, machines, daemon restarts and USB ports.
 - **Pure Go, zero cgo, zero dependencies.** The pcscd IPC protocol ([framed requests](https://pcsclite.apdu.fr/), raw struct responses) is implemented from scratch against pcsc-lite 1.8.24 through 2.4.x, including version down-negotiation for old daemons. One static binary, nothing to link, nothing to break.
 - **Hardware-free tests.** A second, independent in-process implementation of the whole wire protocol acts as a fake `pcscd`. Client and fake agreeing is itself under test — `make test` needs no reader, no card, runs fully parallel.
-- **Privacy cards handled correctly.** ISO/IEC 14443-3 random UIDs (phone NFC emulation, eID, newer DESFire — a *new* UID per activation) are detected and rejected as identifiers, with a clean fallback to type level. `Card.Source` (`uid` / `atr`) always tells you which identity you got.
+- **Privacy cards handled correctly.** ISO/IEC 14443-3 random UIDs (phone NFC emulation, eID, newer DESFire — a *new* UID per activation) are detected and rejected as identifiers. A btag always requires a valid UID: a card whose UID cannot be read produces no output line at all (silently in normal mode, with the full diagnostic trace under `DEBUG=1`), never a type level ATR identity. `Card.Source` (`uid` / `none`) tells you which.
 
 ## The btag
 
@@ -43,7 +43,7 @@ ID = alnum( SHA-256("pcscid/v1|" + card-type + "|" + uid) )[:10]    # → xxx-xx
 | Ingredient | Meaning |
 | --- | --- |
 | `card-type` | detected from the ATR: PC/SC part 3 contactless table (`mifare classic 1k`, `mifare ultralight ev1`, `felica`, `picopass 16k`, …), known full ATRs (`german eid/passport (npa)`, `yubikey 5 nfc`, `deutschlandticket (vdv-ka)`), or `unknown` |
-| `uid` | the card's own unique tag (4/7/10 bytes). When neither card nor reader provides one, the ATR is used and the ID degrades to type level — `Card.Source` says which |
+| `uid` | the card's own unique tag (4/7/10 bytes). Required: without a valid UID no btag is served at all (failed read or random UID) — the presentation is skipped silently in normal mode, `DEBUG=1` traces every detail. A type level ATR identity is never printed |
 
 The derivation is a pure function of card type + tag: no timestamps, no reader names, no machine state. The same card produces the same btag everywhere, forever — the digest is pinned by golden tests, so it can never change silently on you.
 
@@ -89,9 +89,9 @@ $ ./pcscid
 #qr-xlrk-i5:r3v-401-5gmr
 ```
 
-One line per presentation: `#`, the reader tag, a colon, the btag. Nothing else — stdout is machine readable by design; the leading `#` marks a btag line.
+One line per presentation: `#`, the reader tag, a colon, the btag. Nothing else — stdout is machine readable by design; the leading `#` marks a btag line. A presentation whose UID could not be read prints nothing: no btag without a valid UID, the failure is only visible in the `DEBUG=1` trace.
 
-At startup stderr carries the **reader inventory**: every reader registered with pcscd is evaluated once and printed with its details and hashes — reader name, model tag, per-unit facts (the USB port path resolves card-less when it is unambiguous, the hardware serial needs a presented card), the portability tier, the effective tag under the configured options, and the identification of a card that is already present:
+At startup stderr carries the **reader inventory**: every reader registered with pcscd is evaluated once and printed with its details and hashes — reader name, model tag, per-unit facts (the USB port path resolves card-less when it is unambiguous, the hardware serial needs a presented card), the portability tier, the effective tag under the configured options, and the identification of a card that is already present. A present card without a readable UID is reported as `card="present without a valid uid, no btag"`, never with an ATR derived tag:
 
 ```console
 $ ./pcscid
@@ -111,6 +111,19 @@ time=... level=DEBUG msg="card inserted" reader="ACS ACR122U 00 00" \
     id=r3v-401-5gmr reader-tag=qr-xlrk-i5 type="mifare classic 1k" source=uid \
     uid="04 11 22 33" protocol=T=1
 #qr-xlrk-i5:r3v-401-5gmr
+```
+
+When the UID read fails, `DEBUG=1` keeps the whole picture — the per-exchange trace and one summary record with every fact — while normal mode prints nothing at all:
+
+```console
+$ DEBUG=1 ./pcscid
+time=... level=DEBUG msg="uid apdu rejected" reader="ACS ACR122U 00 00" attempt=3 sw="63 00"
+time=... level=DEBUG msg="uid unreadable after every round, the card presentation is skipped (no btag without a valid uid)" \
+    reader="ACS ACR122U 00 00" rounds=3 …
+time=... level=DEBUG msg="card presentation skipped, no btag without a valid uid" \
+    reader="ACS ACR122U 00 00" reader-tag=qr-xlrk-i5 type="mifare classic 1k" \
+    uid="" atr="3B 8F …" protocol=T=1 \
+    consequence="no reader/btag line is printed for this presentation"
 ```
 
 `./pcscid -version` prints the build-time semver (injected from the latest git tag by `make build`).
@@ -210,6 +223,9 @@ if err != nil {
 for ev := range events {
 	switch ev.Kind {
 	case pcscid.KindInsert:
+		// Source is "uid": an insertion event always carries a
+		// valid UID derived btag, unidentifiable cards are never
+		// reported as insertions.
 		fmt.Println(ev.Card.ID, ev.Card.Type, ev.Card.Source)
 	case pcscid.KindRemove:
 		fmt.Println("removed from", ev.Reader)
@@ -261,7 +277,7 @@ cmd/pcscid ──▶ pcscid.Watch ──▶ pcsc.Client ──▶ /run/pcscd/pcs
 
 1. `pcsc.Client` performs the header-less version handshake (claims 4.4, adopts 4.5 when pcscd 2.x offers it, down-negotiates for old daemons), establishes a context and fetches the 16-entry `READER_STATE` array — reader names, presence bits, event counters, ATRs.
 2. Card insertions (presence bit plus event counter change) trigger identification: connect in shared mode, negotiate T=0/T=1, transmit the UID pseudo-APDU, disconnect.
-3. The ATR yields the card type; type plus UID (or ATR fallback) yields the btag.
+3. The ATR yields the card type; type plus UID yields the btag. A valid UID is mandatory: when the UID read fails after its full retry and card-reset budget, or the card serves an ISO/IEC 14443-3 random UID, the presentation is skipped — no insertion event, no output line, silently in normal mode and fully traced under `DEBUG=1`.
 4. Reader state waits are bounded at a 1 s tick; timeouts are client-side and unblock the daemon through the stop request, so the stream stays in sync. Context cancellation closes the socket for an instant exit. With no reader registered the daemon answers the wait immediately — the loop polls gently instead of spinning.
 
 The empirical protocol gotchas (header-less responses, the unframed APDU bytes of `CMD_TRANSMIT`, the registration dump that is *not* a change signal) are documented in the code and covered by tests against both daemon generations.
