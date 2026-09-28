@@ -92,9 +92,14 @@ cmd/pcscid ─ pcscid (root pkg) ─ pcsc (wire client) ─ /run/pcscd/pcscd.com
   card connection submits NO URBs, so the probe window (UID plus
   pinning exchanges in `probeReaderCard`) is a burst of URBs to
   exactly the probed device; the sysfs `urbnum` counter that moved
-  identifies the unit, independent of the daemon's reader order. An
-  ambiguous correlation refuses with a qualified error unless every
-  other candidate is already claimed (elimination).
+  identifies the unit, independent of the daemon's reader order. The
+  winner must clear a minimum delta and a margin over the runner up;
+  candidates missing from the before snapshot (a mid-window hotplug:
+  the probed reader was registered before the wait, so its device
+  cannot be new) are ineligible, or their whole urbnum history would
+  count as the delta and win spuriously. An ambiguous correlation
+  refuses with a qualified error unless every other candidate is
+  already claimed (elimination).
 - The per-session `unitRegistry` keeps the identity persistent and
   collision free: one port = one reader name, a transient probe
   failure falls back to the remembered identity (a tag cannot flip),
@@ -206,7 +211,8 @@ returns the live reader state for failure injection
 SCARD_E_COMM_DATA_LOST for the next n attempts, the transient
 activation race of a freshly inserted card; `StuckUID` wedges the
 PICC with 63 00 for the whole connection, only a SCARD_RESET_CARD
-disconnect cures it, exactly the ACR122U failure).
+disconnect cures it, exactly the ACR122U failure). `RemoveCard`
+publishes a removal event through the same fake.
 
 ## Timing budget (short card presentations)
 
