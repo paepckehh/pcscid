@@ -25,6 +25,9 @@ pcscd manages (NFC, mifare, RFID, eID, contact cards).
   overrides). `make check` — read-only gofmt/vet/tidy-diff.
   `make test` — parallel, no test cache, hardware free.
   `make update`/`make push` — pull (+ tags) / pull plus push.
+  `make local`/`make local-debug` — update plus build, then run the
+  sample app against the real pcscd with `PCSCID_MAC_ID=1
+  PCSCID_USB_PATH_ID=1` (`local-debug` adds `DEBUG=1`).
   `make deploy-test-nix` — sudo deploy to the pilot kiosk.
   `make deps` — DESTRUCTIVE module re-init: never run it, the module
   is dependency free by design.

@@ -43,4 +43,10 @@ check:
 test:
 	go test -count=1 -parallel $$(nproc) -p $$(nproc) ./...
 
-.PHONY: all info build update push deps check test
+local-debug: update build
+	DEBUG="1" PCSCID_MAC_ID="1" PCSCID_USB_PATH_ID="1" ./pcscid
+
+local: update build
+	PCSCID_MAC_ID="1" PCSCID_USB_PATH_ID="1" ./pcscid
+
+.PHONY: all info build update push deps check test local local-debug
