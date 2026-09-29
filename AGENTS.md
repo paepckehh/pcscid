@@ -29,6 +29,20 @@ pcscd manages (NFC, mifare, RFID, eID, contact cards).
   `make deps` — DESTRUCTIVE module re-init: never run it, the module
   is dependency free by design.
 
+## Release (GitHub mirror, GoReleaser)
+
+The repo is mirrored to `github.com/paepckehh/pcscid`; every tag
+push (`git push --tags`, step 6 above) triggers
+`.github/workflows/release.yml`, which runs GoReleaser with
+`.goreleaser.yml`. Cross-compiled static binaries (`CGO_ENABLED=0`,
+release tag injected into `Version()`) as
+`pcscid-<os>_<arch>_<version>.tar.gz` for linux, freebsd, openbsd,
+netbsd on amd64 and arm64, plus deb and rpm packages
+(`pcscid_package_<version>_<os>_<arch>`) for the linux arches and
+one `checksums.txt` (SHA-256). Release notes: conventional-commit
+groups via the GitHub API. Only the runtime is Linux-only (pcscd,
+sysfs); the pure-Go binary itself compiles on every target above.
+
 ## Architecture
 
 ```text

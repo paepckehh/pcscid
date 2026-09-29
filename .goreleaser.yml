@@ -1,0 +1,78 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# goreleaser v2 configuration
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  -
+    id: "pcscid"
+    binary: pcscid
+    main: ./cmd/pcscid/main.go
+    env:
+      - CGO_ENABLED=0
+    # Link the release tag into the binary (Version()), so shipped
+    # artifacts report their release tag. Falls back to defaultVersion
+    # in version.go for snapshot builds without -ldflags.
+    ldflags:
+      - -s -w -X paepcke.de/pcscid.version=v{{ .Version }}
+    goos:
+      - linux
+      - freebsd
+      - openbsd
+      - netbsd
+    goarch:
+      - amd64
+      - arm64
+archives:
+  -
+    id: pcscid-binaries
+    name_template: "pcscid-{{ .Os }}_{{ .Arch }}_{{ .Version }}"
+    files:
+      - LICENSE
+      - README.md
+checksum:
+  name_template: 'checksums.txt'
+release:
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Tag }}"
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: "Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Improvements"
+      regexp: '^.*?(perf|refactor|improve)(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: "Documentation"
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: "CI & Build"
+      regexp: '^.*?(ci|build|chore)(\([[:word:]]+\))??!?:.+$'
+      order: 4
+    - title: "Others"
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+nfpms:
+  -
+    file_name_template: "pcscid_package_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    vendor: Michael Paepcke
+    homepage: https://paepcke.de/pcscid
+    maintainer: Michael Paepcke <git@paepcke.de>
+    description: Short stable btag per card and reader tags per model and unit, for every card the local pcscd manages
+    license: MIT
+    formats:
+      - deb
+      - rpm
