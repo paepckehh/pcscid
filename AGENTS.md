@@ -44,7 +44,13 @@ netbsd on amd64 and arm64, plus deb and rpm packages
 (`pcscid_package_<version>_<os>_<arch>`) for the linux arches and
 one `checksums.txt` (SHA-256). Release notes: conventional-commit
 groups via the GitHub API. Only the runtime is Linux-only (pcscd,
-sysfs); the pure-Go binary itself compiles on every target above.
+sysfs): the pure-Go binary itself compiles on every target above —
+the `pcsc/` files carry NO build tags (keep it that way: plain
+sockets and file I/O, nothing Linux-specific), a new BSD compile
+break must be fixed or the target dropped from `.goreleaser.yml`.
+Verify locally before tagging:
+`GOOS=<os> GOARCH=<arch> CGO_ENABLED=0 go build ./cmd/pcscid` plus
+`GOOS=<os> go vet ./...` for freebsd, openbsd, netbsd.
 
 ## Architecture
 

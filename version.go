@@ -7,7 +7,7 @@ import "runtime/debug"
 // the current release tag and is bumped together with the git tag on
 // every code update (hardwired requirement, see AGENTS.md top
 // section).
-var defaultVersion = "v0.0.163"
+var defaultVersion = "v0.0.164"
 
 // version is overridden at build time by the Go linker, for example:
 //

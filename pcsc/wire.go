@@ -1,5 +1,3 @@
-//go:build linux
-
 // Wire encoding of the pcscd daemon IPC protocol, as defined by
 // pcsc-lite src/winscard_msg.h and src/readers.h.
 package pcsc
